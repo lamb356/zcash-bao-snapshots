@@ -121,7 +121,6 @@ export class BaoVerifier {
   private activeConcurrency: number = 1;
   private activeWorkers: number = 0;
   private lastChunkTime: number = 0;
-  private lastChunkBytes: number = 0;
 
   /**
    * Create a new BaoVerifier.
@@ -313,7 +312,6 @@ export class BaoVerifier {
     this.activeConcurrency = Math.min(2, this.config.concurrency);
     this.activeWorkers = 0;
     this.lastChunkTime = this.startTime;
-    this.lastChunkBytes = 0;
 
     // Initialize PartialBao
     const rootHashBytes = this.hexToBytes(this.config.rootHash);
@@ -487,7 +485,6 @@ export class BaoVerifier {
     }
 
     this.lastChunkTime = now;
-    this.lastChunkBytes = bytesDownloaded;
   }
 
   /**
