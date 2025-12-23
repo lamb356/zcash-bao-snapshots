@@ -1,5 +1,7 @@
 # Zcash Bao Snapshots
 
+[![CI](https://github.com/lamb356/zcash-bao-snapshots/actions/workflows/ci.yml/badge.svg)](https://github.com/lamb356/zcash-bao-snapshots/actions/workflows/ci.yml)
+
 Bao-verified streaming of Zcash tree states for faster wallet recovery.
 
 This library enables light wallets to securely download and verify Zcash commitment tree snapshots using [Bao](https://github.com/oconnor663/bao) verified streaming. Instead of syncing from genesis, wallets can start from a verified snapshot and only sync recent blocks.

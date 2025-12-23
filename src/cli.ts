@@ -224,20 +224,22 @@ ${colors.bold}OPTIONS${colors.reset}
   --dir <path>      Directory containing snapshots (required)
   --port <number>   HTTP port (default: 3000)
   --host <host>     Host to bind to (default: 0.0.0.0)
-  --cors            Enable CORS headers
+  --no-cors         Disable CORS headers (enabled by default)
   --help            Show this help message
 
 ${colors.bold}FEATURES${colors.reset}
+  - Auto-discovers all snapshots from .metadata.json files
+  - Clean index page with snapshot details at /
   - HTTP Range request support for partial downloads
+  - CORS enabled by default for browser access
   - Proper Content-Type headers for .bao, .json, .data files
-  - Directory listing at root
 
 ${colors.bold}EXAMPLES${colors.reset}
   ${colors.dim}# Serve on default port 3000${colors.reset}
   zcash-bao serve --dir ./snapshots
 
-  ${colors.dim}# Custom port with CORS enabled${colors.reset}
-  zcash-bao serve --dir ./snapshots --port 8080 --cors
+  ${colors.dim}# Custom port${colors.reset}
+  zcash-bao serve --dir ./snapshots --port 8080
 `;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -638,7 +640,7 @@ async function runServe(args: string[]): Promise<number> {
       dir: { type: 'string' },
       port: { type: 'string', default: '3000' },
       host: { type: 'string', default: '0.0.0.0' },
-      cors: { type: 'boolean', default: false },
+      'no-cors': { type: 'boolean', default: false },
       help: { type: 'boolean', default: false },
     },
     strict: true,
@@ -665,7 +667,7 @@ async function runServe(args: string[]): Promise<number> {
     dir: values.dir,
     port,
     host: values.host ?? '0.0.0.0',
-    cors: values.cors ?? false,
+    cors: !values['no-cors'],
   };
 
   // Verify directory exists
@@ -695,9 +697,7 @@ async function runServe(args: string[]): Promise<number> {
       log(`${colors.bold}Serving snapshots${colors.reset}`);
       logInfo('Directory', options.dir);
       logInfo('URL', `http://${options.host === '0.0.0.0' ? 'localhost' : options.host}:${port}`);
-      if (options.cors) {
-        logInfo('CORS', 'enabled');
-      }
+      logInfo('CORS', options.cors ? 'enabled' : 'disabled');
       log('');
       log(`${colors.dim}Press Ctrl+C to stop${colors.reset}`);
     });
@@ -765,9 +765,9 @@ async function handleRequest(
     const fileStat = await stat(filePath);
 
     if (fileStat.isDirectory()) {
-      // Serve directory listing
+      // Serve index page at root, directory listing elsewhere
       if (pathname === '/') {
-        await serveDirectoryListing(res, options.dir, pathname);
+        await serveIndexPage(res, options.dir);
       } else {
         await serveDirectoryListing(res, filePath, pathname);
       }
@@ -785,6 +785,268 @@ async function handleRequest(
       throw error;
     }
   }
+}
+
+interface SnapshotInfo {
+  baseName: string;
+  metadata: SnapshotMetadata;
+  baoSize: number;
+  dataSize?: number;
+  metadataSize: number;
+}
+
+async function discoverSnapshots(dirPath: string): Promise<SnapshotInfo[]> {
+  const files = await readdir(dirPath);
+  const metadataFiles = files.filter((f) => f.endsWith('.metadata.json'));
+
+  const snapshots: SnapshotInfo[] = [];
+
+  for (const metaFile of metadataFiles) {
+    try {
+      const metaPath = join(dirPath, metaFile);
+      const content = await readFile(metaPath, 'utf-8');
+      const metadata = JSON.parse(content) as SnapshotMetadata;
+
+      const baseName = metaFile.replace('.metadata.json', '');
+      const baoPath = join(dirPath, `${baseName}.bao`);
+
+      let baoSize = 0;
+      let dataSize: number | undefined;
+
+      try {
+        const baoStat = await stat(baoPath);
+        baoSize = baoStat.size;
+      } catch {
+        // BAO file might not exist
+      }
+
+      if (metadata.outboard) {
+        const dataPath = join(dirPath, `${baseName}.data`);
+        try {
+          const dataStat = await stat(dataPath);
+          dataSize = dataStat.size;
+        } catch {
+          // Data file might not exist
+        }
+      }
+
+      const metaStat = await stat(metaPath);
+
+      const info: SnapshotInfo = {
+        baseName,
+        metadata,
+        baoSize,
+        metadataSize: metaStat.size,
+      };
+      if (dataSize !== undefined) {
+        info.dataSize = dataSize;
+      }
+      snapshots.push(info);
+    } catch {
+      // Skip invalid metadata files
+    }
+  }
+
+  // Sort by height descending
+  snapshots.sort((a, b) => b.metadata.height - a.metadata.height);
+
+  return snapshots;
+}
+
+async function serveIndexPage(res: ServerResponse, dirPath: string): Promise<void> {
+  const snapshots = await discoverSnapshots(dirPath);
+
+  const rows = snapshots
+    .map((s) => {
+      const mode = s.metadata.outboard ? 'outboard' : 'combined';
+      const iroh = s.metadata.irohCompatible ? ' (Iroh)' : '';
+      const totalSize = s.baoSize + (s.dataSize ?? 0);
+      const createdDate = new Date(s.metadata.createdAt).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      });
+
+      const files = s.metadata.outboard
+        ? `<a href="/${s.baseName}.bao">.bao</a> | <a href="/${s.baseName}.data">.data</a>`
+        : `<a href="/${s.baseName}.bao">.bao</a>`;
+
+      return `
+      <tr>
+        <td class="height">${s.metadata.height.toLocaleString()}</td>
+        <td class="network">${s.metadata.network}</td>
+        <td class="mode">${mode}${iroh}</td>
+        <td class="size">${formatBytes(s.metadata.originalSize)}</td>
+        <td class="encoded">${formatBytes(totalSize)}</td>
+        <td class="date">${createdDate}</td>
+        <td class="files">
+          ${files} | <a href="/${s.baseName}.metadata.json">.json</a>
+        </td>
+      </tr>`;
+    })
+    .join('\n');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zcash Bao Snapshots</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f0f23;
+      color: #ccc;
+      padding: 2rem;
+      line-height: 1.6;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    header {
+      margin-bottom: 2rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid #333;
+    }
+    h1 {
+      color: #f5a623;
+      font-size: 1.75rem;
+      margin-bottom: 0.5rem;
+    }
+    .subtitle { color: #666; font-size: 0.9rem; }
+    .stats {
+      display: flex;
+      gap: 2rem;
+      margin: 1.5rem 0;
+      flex-wrap: wrap;
+    }
+    .stat {
+      background: #1a1a2e;
+      padding: 1rem 1.5rem;
+      border-radius: 8px;
+      border: 1px solid #333;
+    }
+    .stat-value { font-size: 1.5rem; color: #f5a623; font-weight: bold; }
+    .stat-label { font-size: 0.8rem; color: #666; text-transform: uppercase; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 1rem;
+      font-size: 0.9rem;
+    }
+    th {
+      text-align: left;
+      padding: 0.75rem 1rem;
+      background: #1a1a2e;
+      color: #888;
+      font-weight: 500;
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      letter-spacing: 0.5px;
+      border-bottom: 2px solid #333;
+    }
+    td {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid #222;
+    }
+    tr:hover { background: #1a1a2e; }
+    .height { font-family: monospace; font-weight: bold; color: #fff; }
+    .network { text-transform: capitalize; }
+    .mode { color: #888; }
+    .size, .encoded { font-family: monospace; text-align: right; }
+    .date { color: #666; }
+    .files { font-family: monospace; }
+    a { color: #4da6ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .empty {
+      text-align: center;
+      padding: 3rem;
+      color: #666;
+    }
+    footer {
+      margin-top: 2rem;
+      padding-top: 1rem;
+      border-top: 1px solid #333;
+      color: #444;
+      font-size: 0.8rem;
+    }
+    code { background: #1a1a2e; padding: 0.2rem 0.4rem; border-radius: 4px; }
+    @media (max-width: 768px) {
+      body { padding: 1rem; }
+      .stats { gap: 1rem; }
+      table { font-size: 0.8rem; }
+      th, td { padding: 0.5rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Zcash Bao Snapshots</h1>
+      <p class="subtitle">Bao-verified streaming of Zcash tree states</p>
+    </header>
+
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-value">${snapshots.length}</div>
+        <div class="stat-label">Snapshots</div>
+      </div>
+      ${
+        snapshots.length > 0
+          ? `
+      <div class="stat">
+        <div class="stat-value">${snapshots[0]?.metadata.height.toLocaleString() ?? 0}</div>
+        <div class="stat-label">Latest Height</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value">${formatBytes(snapshots.reduce((sum, s) => sum + s.baoSize + (s.dataSize ?? 0), 0))}</div>
+        <div class="stat-label">Total Size</div>
+      </div>
+      `
+          : ''
+      }
+    </div>
+
+    ${
+      snapshots.length > 0
+        ? `
+    <table>
+      <thead>
+        <tr>
+          <th>Height</th>
+          <th>Network</th>
+          <th>Mode</th>
+          <th>Original</th>
+          <th>Encoded</th>
+          <th>Created</th>
+          <th>Files</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows}
+      </tbody>
+    </table>
+    `
+        : `
+    <div class="empty">
+      <p>No snapshots found.</p>
+      <p style="margin-top: 1rem;">Generate snapshots with: <code>zcash-bao generate --height &lt;number&gt;</code></p>
+    </div>
+    `
+    }
+
+    <footer>
+      <p>Powered by <a href="https://github.com/lamb356/zcash-bao-snapshots">zcash-bao-snapshots</a></p>
+    </footer>
+  </div>
+</body>
+</html>`;
+
+  res.writeHead(200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': Buffer.byteLength(html),
+    'Cache-Control': 'no-cache',
+  });
+  res.end(html);
 }
 
 async function serveDirectoryListing(
@@ -808,11 +1070,11 @@ async function serveDirectoryListing(
 <head>
   <title>Index of ${urlPath}</title>
   <style>
-    body { font-family: monospace; padding: 20px; }
-    h1 { color: #333; }
+    body { font-family: monospace; padding: 20px; background: #0f0f23; color: #ccc; }
+    h1 { color: #f5a623; }
     ul { list-style: none; padding: 0; }
     li { margin: 5px 0; }
-    a { color: #0066cc; text-decoration: none; }
+    a { color: #4da6ff; text-decoration: none; }
     a:hover { text-decoration: underline; }
   </style>
 </head>
@@ -825,7 +1087,7 @@ ${urlPath !== '/' ? '    <li><a href="../">..</a></li>\n' : ''}${items}
 </html>`;
 
   res.writeHead(200, {
-    'Content-Type': 'text/html',
+    'Content-Type': 'text/html; charset=utf-8',
     'Content-Length': Buffer.byteLength(html),
   });
   res.end(html);
