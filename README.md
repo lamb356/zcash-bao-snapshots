@@ -249,9 +249,12 @@ interface RpcClientConfig {
 
 ```typescript
 interface BaoVerifierConfig {
+  // Required
   url: string;              // URL to fetch from
   rootHash: string;         // expected BLAKE3 Bao root hash (hex)
   contentLength: number;    // total content size
+
+  // Optional - Basic
   outboardUrl?: string;     // URL for outboard tree (if separate)
   concurrency?: number;     // parallel fetches (default: 4)
   chunkSize?: number;       // bytes per chunk (default: 1024)
@@ -259,8 +262,27 @@ interface BaoVerifierConfig {
   maxRetries?: number;      // retries per chunk (default: 3)
   storage?: StorageAdapter; // for pause/resume state
   fetch?: typeof fetch;     // custom fetch implementation
+
+  // Optional - Performance Tuning
+  progressThrottleMs?: number;            // min ms between progress events (default: 100)
+  stateSaveIntervalMs?: number;           // ms between state saves (default: 5000)
+  prefetchSize?: number;                  // chunks to prefetch ahead (default: 3)
+  speedHistorySize?: number;              // speed samples for adaptive concurrency (default: 10)
+  minSamplesForConcurrencyAdjust?: number; // min samples before adjusting (default: 5)
 }
 ```
+
+#### Performance Tuning
+
+The verifier includes adaptive concurrency control that adjusts parallelism based on download speed:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `progressThrottleMs` | 100 | Minimum milliseconds between progress events. Lower values provide more frequent updates but increase overhead. |
+| `stateSaveIntervalMs` | 5000 | Milliseconds between state persistence saves. Lower values provide more frequent checkpoints but increase I/O. |
+| `prefetchSize` | 3 | Number of chunks to prefetch ahead during streaming. Higher values may improve throughput but use more memory. |
+| `speedHistorySize` | 10 | Number of speed samples to keep for adaptive concurrency. Higher values provide smoother adjustments but slower response. |
+| `minSamplesForConcurrencyAdjust` | 5 | Minimum speed samples before adjusting concurrency. Higher values reduce noise but delay initial optimization. |
 
 ## Output Files
 

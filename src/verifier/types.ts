@@ -68,6 +68,40 @@ export interface BaoVerifierConfig {
    * Storage adapter for persisting download state.
    */
   readonly storage?: StorageAdapter;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Performance tuning options
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Minimum interval between progress events in milliseconds (default: 100).
+   * Lower values provide more frequent updates but increase overhead.
+   */
+  readonly progressThrottleMs?: number;
+
+  /**
+   * Interval for saving state to storage in milliseconds (default: 5000).
+   * Lower values provide more frequent checkpoints but increase I/O.
+   */
+  readonly stateSaveIntervalMs?: number;
+
+  /**
+   * Number of chunks to prefetch ahead during streaming (default: 3).
+   * Higher values may improve throughput but use more memory.
+   */
+  readonly prefetchSize?: number;
+
+  /**
+   * Number of speed samples to keep for adaptive concurrency (default: 10).
+   * Higher values provide smoother adjustments but slower response.
+   */
+  readonly speedHistorySize?: number;
+
+  /**
+   * Minimum speed samples before adjusting concurrency (default: 5).
+   * Higher values reduce noise but delay initial optimization.
+   */
+  readonly minSamplesForConcurrencyAdjust?: number;
 }
 
 /**

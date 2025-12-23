@@ -108,11 +108,16 @@ interface WritableStream {
  * ```
  */
 export class BaoVerifier {
-  private readonly config: Required<Omit<BaoVerifierConfig, 'storage' | 'fetch' | 'outboardUrl' | 'irohCompatible'>> & {
+  private readonly config: Required<Omit<BaoVerifierConfig, 'storage' | 'fetch' | 'outboardUrl' | 'irohCompatible' | 'progressThrottleMs' | 'stateSaveIntervalMs' | 'prefetchSize' | 'speedHistorySize' | 'minSamplesForConcurrencyAdjust'>> & {
     storage: StorageAdapter | undefined;
     fetch: typeof globalThis.fetch;
     outboardUrl: string | undefined;
     irohCompatible: boolean;
+    progressThrottleMs: number;
+    stateSaveIntervalMs: number;
+    prefetchSize: number;
+    speedHistorySize: number;
+    minSamplesForConcurrencyAdjust: number;
   };
 
   private readonly listeners: Map<keyof BaoVerifierEvents, Set<BaoVerifierEventListener<keyof BaoVerifierEvents>>>;
@@ -168,6 +173,12 @@ export class BaoVerifier {
       maxRetries: config.maxRetries ?? DEFAULT_CONFIG.maxRetries,
       fetch: config.fetch ?? globalThis.fetch.bind(globalThis),
       storage: config.storage,
+      // Performance tuning options
+      progressThrottleMs: config.progressThrottleMs ?? PROGRESS_THROTTLE_MS,
+      stateSaveIntervalMs: config.stateSaveIntervalMs ?? STATE_SAVE_INTERVAL_MS,
+      prefetchSize: config.prefetchSize ?? PREFETCH_SIZE,
+      speedHistorySize: config.speedHistorySize ?? SPEED_HISTORY_SIZE,
+      minSamplesForConcurrencyAdjust: config.minSamplesForConcurrencyAdjust ?? 5,
     };
 
     this.listeners = new Map();
@@ -289,7 +300,7 @@ export class BaoVerifier {
    */
   private emitProgress(force: boolean = false): void {
     const now = Date.now();
-    if (!force && now - this.lastProgressEmit < PROGRESS_THROTTLE_MS) {
+    if (!force && now - this.lastProgressEmit < this.config.progressThrottleMs) {
       return;
     }
     this.lastProgressEmit = now;
@@ -480,12 +491,12 @@ export class BaoVerifier {
 
       // Add to speed history
       this.speedHistory.push(speed);
-      if (this.speedHistory.length > SPEED_HISTORY_SIZE) {
+      if (this.speedHistory.length > this.config.speedHistorySize) {
         this.speedHistory.shift();
       }
 
-      // Only adjust after we have enough samples (5 minimum for stability)
-      if (this.speedHistory.length >= 5) {
+      // Only adjust after we have enough samples
+      if (this.speedHistory.length >= this.config.minSamplesForConcurrencyAdjust) {
         const avgSpeed = this.speedHistory.reduce((a, b) => a + b, 0) / this.speedHistory.length;
 
         if (speed > avgSpeed * CONCURRENCY_INCREASE_THRESHOLD) {
@@ -583,7 +594,7 @@ export class BaoVerifier {
         // Save state periodically (time-based)
         if (this.config.storage) {
           const now = Date.now();
-          if (now - this.lastStateSaveTime >= STATE_SAVE_INTERVAL_MS) {
+          if (now - this.lastStateSaveTime >= this.config.stateSaveIntervalMs) {
             this.lastStateSaveTime = now;
             await this.saveState();
           }
@@ -935,7 +946,7 @@ export class BaoVerifier {
 
     while (nextChunkToWrite < this.totalChunks) {
       // Prefetch upcoming chunks (for future streaming-during-download support)
-      for (let offset = 1; offset <= PREFETCH_SIZE; offset++) {
+      for (let offset = 1; offset <= this.config.prefetchSize; offset++) {
         const prefetchIndex = nextChunkToWrite + offset;
         if (prefetchIndex < this.totalChunks &&
             !this.chunkData.has(prefetchIndex) &&
