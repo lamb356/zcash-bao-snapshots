@@ -6,6 +6,8 @@
 
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import { baoEncode, baoEncodeIroh } from 'blake3-bao';
 import type { TreeState } from '../types/zcash.js';
 import type {
@@ -19,6 +21,30 @@ import type {
 } from '../types/snapshot.js';
 import { SNAPSHOT_FORMAT_VERSION } from '../types/snapshot.js';
 import type { ZcashRpcClient } from './rpc-client.js';
+
+/**
+ * Threshold for using worker thread encoding (10MB).
+ */
+const WORKER_THRESHOLD_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Get the path to the worker script.
+ */
+function getWorkerPath(): string {
+  const currentFile = fileURLToPath(import.meta.url);
+  return join(dirname(currentFile), 'bao-worker.js');
+}
+
+/**
+ * Worker output interface.
+ */
+interface WorkerOutput {
+  success: boolean;
+  encodedBase64?: string;
+  hashBase64?: string;
+  dataBase64?: string;
+  error?: string;
+}
 
 /**
  * Error thrown when snapshot generation fails.
@@ -444,8 +470,26 @@ export class SnapshotGenerator {
 
   /**
    * Bao encode data using the appropriate method.
+   * Uses worker thread for large files (> 10MB) to avoid blocking main thread.
    */
   private async baoEncodeData(
+    data: Uint8Array,
+    mode: BaoEncodingMode,
+    irohCompatible: boolean
+  ): Promise<BaoEncodeResult> {
+    // Use worker thread for large data
+    if (data.length > WORKER_THRESHOLD_BYTES) {
+      return this.baoEncodeInWorker(data, mode, irohCompatible);
+    }
+
+    // Inline encoding for smaller files
+    return this.baoEncodeInline(data, mode, irohCompatible);
+  }
+
+  /**
+   * Bao encode data inline (in main thread).
+   */
+  private async baoEncodeInline(
     data: Uint8Array,
     mode: BaoEncodingMode,
     irohCompatible: boolean
@@ -474,6 +518,64 @@ export class SnapshotGenerator {
         hash: result.hash,
       };
     }
+  }
+
+  /**
+   * Bao encode data in a worker thread.
+   */
+  private async baoEncodeInWorker(
+    data: Uint8Array,
+    mode: BaoEncodingMode,
+    irohCompatible: boolean
+  ): Promise<BaoEncodeResult> {
+    return new Promise((resolve, reject) => {
+      const workerPath = getWorkerPath();
+      const dataBase64 = Buffer.from(data).toString('base64');
+
+      const worker = new Worker(workerPath, {
+        workerData: {
+          dataBase64,
+          mode,
+          irohCompatible,
+        },
+      });
+
+      worker.on('message', (result: WorkerOutput) => {
+        worker.terminate();
+
+        if (!result.success) {
+          reject(new Error(result.error ?? 'Worker encoding failed'));
+          return;
+        }
+
+        const encoded = Buffer.from(result.encodedBase64!, 'base64');
+        const hash = Buffer.from(result.hashBase64!, 'base64');
+
+        if (mode === 'outboard') {
+          resolve({
+            encoded: new Uint8Array(encoded),
+            hash: new Uint8Array(hash),
+            data,
+          });
+        } else {
+          resolve({
+            encoded: new Uint8Array(encoded),
+            hash: new Uint8Array(hash),
+          });
+        }
+      });
+
+      worker.on('error', (err) => {
+        worker.terminate();
+        reject(err);
+      });
+
+      worker.on('exit', (code) => {
+        if (code !== 0) {
+          reject(new Error(`Worker exited with code ${code}`));
+        }
+      });
+    });
   }
 
   /**

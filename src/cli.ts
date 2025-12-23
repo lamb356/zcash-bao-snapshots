@@ -15,6 +15,8 @@ import { parseArgs } from 'node:util';
 import { readFile, stat, readdir } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { createServer } from 'node:http';
+import { createGzip } from 'node:zlib';
+import { pipeline } from 'node:stream/promises';
 import { join, extname, resolve, normalize, sep } from 'node:path';
 import { ZcashRpcClient, SnapshotGenerator, SnapshotError } from './generator/index.js';
 import { verifyBaoData, verifyBaoOutboard, BaoVerifierError } from './verifier/index.js';
@@ -1179,21 +1181,71 @@ async function serveFile(
       return;
     }
 
+    // Stream range request with proper error handling
     const stream = createReadStream(filePath, { start, end });
-    stream.pipe(res);
-  } else {
-    // Full file
-    headers['Content-Length'] = fileSize;
-
-    res.writeHead(200, headers);
-
-    if (req.method === 'HEAD') {
-      res.end();
-      return;
+    try {
+      await pipeline(stream, res);
+    } catch (err) {
+      // Client disconnect or other error - cleanup handled by pipeline
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Internal Server Error');
+      }
     }
+  } else {
+    // Full file - check if we can use gzip for JSON
+    const acceptEncoding = req.headers['accept-encoding'] ?? '';
+    const supportsGzip = acceptEncoding.includes('gzip');
+    const isJson = ext === '.json';
 
-    const stream = createReadStream(filePath);
-    stream.pipe(res);
+    if (supportsGzip && isJson) {
+      // Gzip compress JSON responses
+      headers['Content-Encoding'] = 'gzip';
+      headers['Vary'] = 'Accept-Encoding';
+      // Don't set Content-Length - it's unknown after compression
+
+      res.writeHead(200, headers);
+
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+
+      // Stream with gzip compression and proper error handling
+      const stream = createReadStream(filePath);
+      const gzip = createGzip();
+      try {
+        await pipeline(stream, gzip, res);
+      } catch (err) {
+        // Client disconnect or other error - cleanup handled by pipeline
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end('Internal Server Error');
+        }
+      }
+    } else {
+      // Serve uncompressed
+      headers['Content-Length'] = fileSize;
+
+      res.writeHead(200, headers);
+
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+
+      // Stream with proper error handling
+      const stream = createReadStream(filePath);
+      try {
+        await pipeline(stream, res);
+      } catch (err) {
+        // Client disconnect or other error - cleanup handled by pipeline
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end('Internal Server Error');
+        }
+      }
+    }
   }
 }
 

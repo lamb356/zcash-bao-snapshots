@@ -58,6 +58,7 @@ const nullLogger: Logger = {
  * - Configurable timeouts
  * - Automatic retries with exponential backoff
  * - Proper error classification and handling
+ * - Connection pooling (via Node.js native fetch/undici)
  * - TypeScript strict mode compatible
  *
  * @example
@@ -70,6 +71,9 @@ const nullLogger: Logger = {
  *
  * const treeState = await client.getTreeState(1000000);
  * console.log(treeState.sapling?.finalRoot);
+ *
+ * // Clean up when done
+ * client.destroy();
  * ```
  */
 export class ZcashRpcClient {
@@ -115,6 +119,15 @@ export class ZcashRpcClient {
       host: this.config.host,
       port: this.config.port,
     });
+  }
+
+  /**
+   * Destroy the client and clean up resources.
+   * Note: With native fetch, connection pooling is handled automatically by undici.
+   * This method is provided for API consistency and future extensibility.
+   */
+  destroy(): void {
+    this.config.logger.debug('RPC client destroyed');
   }
 
   /**
@@ -219,6 +232,7 @@ export class ZcashRpcClient {
 
   /**
    * Execute a single RPC request without retries.
+   * Uses native fetch with keepalive for connection pooling.
    */
   private async executeRequest<T>(request: JsonRpcRequest): Promise<T> {
     const controller = new AbortController();
@@ -236,6 +250,8 @@ export class ZcashRpcClient {
           },
           body: JSON.stringify(request),
           signal: controller.signal,
+          // Enable keep-alive for connection reuse (Node.js 18+)
+          keepalive: true,
         });
       } catch (error) {
         if (error instanceof Error && error.name === 'AbortError') {

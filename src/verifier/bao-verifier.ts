@@ -29,6 +29,40 @@ const DEFAULT_CONFIG = {
 } as const;
 
 /**
+ * Minimum interval between progress events (ms).
+ */
+const PROGRESS_THROTTLE_MS = 100;
+
+/**
+ * Interval for saving state to storage (ms).
+ */
+const STATE_SAVE_INTERVAL_MS = 5000;
+
+/**
+ * Number of speed samples to keep for adaptive concurrency.
+ */
+const SPEED_HISTORY_SIZE = 10;
+
+/**
+ * Threshold multipliers for adjusting concurrency.
+ */
+const CONCURRENCY_INCREASE_THRESHOLD = 1.1;
+const CONCURRENCY_DECREASE_THRESHOLD = 0.8;
+
+/**
+ * Number of chunks to buffer before streaming output.
+ */
+const STREAM_BUFFER_SIZE = 10;
+
+/**
+ * Generic writable stream interface for streaming output.
+ */
+interface WritableStream {
+  write(chunk: Uint8Array): boolean | Promise<boolean>;
+  end(): void | Promise<void>;
+}
+
+/**
  * Bao verifier with resumable, concurrent chunk downloads.
  *
  * This class wraps the PartialBao class from blake3-bao and provides:
@@ -77,8 +111,17 @@ export class BaoVerifier {
   private bytesDownloaded: number = 0;
   private lastProgressTime: number = 0;
   private lastBytesDownloaded: number = 0;
+  private lastProgressEmit: number = 0;
+  private lastStateSaveTime: number = 0;
   private totalChunks: number = 0;
   private stateKey: string;
+
+  // Adaptive concurrency tracking
+  private speedHistory: number[] = [];
+  private activeConcurrency: number = 1;
+  private activeWorkers: number = 0;
+  private lastChunkTime: number = 0;
+  private lastChunkBytes: number = 0;
 
   /**
    * Create a new BaoVerifier.
@@ -227,6 +270,20 @@ export class BaoVerifier {
   }
 
   /**
+   * Emit progress with throttling.
+   * Skips emit if less than PROGRESS_THROTTLE_MS since last emit.
+   * @param force - If true, emit regardless of throttling (for completion)
+   */
+  private emitProgress(force: boolean = false): void {
+    const now = Date.now();
+    if (!force && now - this.lastProgressEmit < PROGRESS_THROTTLE_MS) {
+      return;
+    }
+    this.lastProgressEmit = now;
+    this.emit('progress', this.getProgress());
+  }
+
+  /**
    * Start or resume verification.
    */
   async start(): Promise<Uint8Array> {
@@ -248,6 +305,15 @@ export class BaoVerifier {
     this.startTime = Date.now();
     this.lastProgressTime = this.startTime;
     this.lastBytesDownloaded = this.bytesDownloaded;
+    this.lastProgressEmit = 0;  // Allow immediate first emit
+    this.lastStateSaveTime = this.startTime;
+
+    // Initialize adaptive concurrency
+    this.speedHistory = [];
+    this.activeConcurrency = Math.min(2, this.config.concurrency);
+    this.activeWorkers = 0;
+    this.lastChunkTime = this.startTime;
+    this.lastChunkBytes = 0;
 
     // Initialize PartialBao
     const rootHashBytes = this.hexToBytes(this.config.rootHash);
@@ -275,6 +341,9 @@ export class BaoVerifier {
 
       // Assemble final data
       const data = this.assembleData();
+
+      // Emit final progress (forced, bypasses throttling)
+      this.emitProgress(true);
 
       // Clean up saved state
       if (this.config.storage) {
@@ -315,37 +384,110 @@ export class BaoVerifier {
   }
 
   /**
-   * Download chunks with concurrency control.
+   * Download chunks with adaptive concurrency control.
    */
   private async downloadChunks(chunkIndices: number[]): Promise<void> {
     const queue = [...chunkIndices];
-    const inFlight: Promise<void>[] = [];
+    const inFlight: Set<Promise<void>> = new Set();
+    let workerIdCounter = 0;
 
-    const processNext = async (): Promise<void> => {
-      while (queue.length > 0 && this.status === 'downloading') {
-        const chunkIndex = queue.shift();
-        if (chunkIndex === undefined) break;
-
-        if (this.pendingChunks.has(chunkIndex) || this.completedChunks.has(chunkIndex)) {
-          continue;
-        }
-
-        this.pendingChunks.add(chunkIndex);
-
-        try {
-          await this.downloadAndVerifyChunk(chunkIndex);
-        } finally {
-          this.pendingChunks.delete(chunkIndex);
-        }
+    const spawnWorker = (): void => {
+      if (this.activeWorkers >= this.activeConcurrency) {
+        return;
       }
+
+      const workerId = ++workerIdCounter;
+      this.activeWorkers++;
+
+      const workerPromise = this.runWorker(queue, workerId);
+      inFlight.add(workerPromise);
+
+      workerPromise.finally(() => {
+        inFlight.delete(workerPromise);
+        this.activeWorkers--;
+
+        // Spawn replacement worker if needed and there's more work
+        if (queue.length > 0 && this.status === 'downloading') {
+          spawnWorker();
+        }
+      });
     };
 
-    // Start concurrent downloaders
-    for (let i = 0; i < this.config.concurrency; i++) {
-      inFlight.push(processNext());
+    // Start initial workers based on adaptive concurrency
+    for (let i = 0; i < this.activeConcurrency; i++) {
+      spawnWorker();
     }
 
-    await Promise.all(inFlight);
+    // Wait for all workers to complete
+    while (inFlight.size > 0) {
+      await Promise.race(inFlight);
+
+      // Spawn additional workers if concurrency increased
+      while (this.activeWorkers < this.activeConcurrency && queue.length > 0 && this.status === 'downloading') {
+        spawnWorker();
+      }
+    }
+  }
+
+  /**
+   * Worker that processes chunks from the queue.
+   */
+  private async runWorker(queue: number[], workerId: number): Promise<void> {
+    while (queue.length > 0 && this.status === 'downloading') {
+      // Check if this worker should exit due to reduced concurrency
+      if (workerId > this.activeConcurrency) {
+        return;
+      }
+
+      const chunkIndex = queue.shift();
+      if (chunkIndex === undefined) break;
+
+      if (this.pendingChunks.has(chunkIndex) || this.completedChunks.has(chunkIndex)) {
+        continue;
+      }
+
+      this.pendingChunks.add(chunkIndex);
+
+      try {
+        await this.downloadAndVerifyChunk(chunkIndex);
+      } finally {
+        this.pendingChunks.delete(chunkIndex);
+      }
+    }
+  }
+
+  /**
+   * Update speed history and adjust concurrency based on performance.
+   */
+  private updateAdaptiveConcurrency(bytesDownloaded: number): void {
+    const now = Date.now();
+    const timeDelta = now - this.lastChunkTime;
+
+    if (timeDelta > 0 && this.lastChunkTime > 0) {
+      const speed = (bytesDownloaded / timeDelta) * 1000; // bytes/sec
+
+      // Add to speed history
+      this.speedHistory.push(speed);
+      if (this.speedHistory.length > SPEED_HISTORY_SIZE) {
+        this.speedHistory.shift();
+      }
+
+      // Only adjust after we have enough samples
+      if (this.speedHistory.length >= 3) {
+        const avgSpeed = this.speedHistory.reduce((a, b) => a + b, 0) / this.speedHistory.length;
+
+        if (speed > avgSpeed * CONCURRENCY_INCREASE_THRESHOLD) {
+          // Speed is good, try increasing concurrency
+          this.activeConcurrency = Math.min(this.activeConcurrency + 1, this.config.concurrency);
+        } else if (speed < avgSpeed * CONCURRENCY_DECREASE_THRESHOLD) {
+          // Speed is degrading, reduce concurrency
+          this.activeConcurrency = Math.max(this.activeConcurrency - 1, 1);
+        }
+      }
+    }
+
+    this.lastChunkTime = now;
+    this.lastChunkBytes = bytesDownloaded;
   }
 
   /**
@@ -403,12 +545,19 @@ export class BaoVerifier {
           this.emit('chunk-verified', info);
         }
 
-        // Emit progress
-        this.emit('progress', this.getProgress());
+        // Emit progress (throttled)
+        this.emitProgress();
 
-        // Save state periodically
-        if (this.config.storage && this.completedChunks.size % 10 === 0) {
-          await this.saveState();
+        // Update adaptive concurrency based on download speed
+        this.updateAdaptiveConcurrency(endOffset - startOffset);
+
+        // Save state periodically (time-based)
+        if (this.config.storage) {
+          const now = Date.now();
+          if (now - this.lastStateSaveTime >= STATE_SAVE_INTERVAL_MS) {
+            this.lastStateSaveTime = now;
+            await this.saveState();
+          }
         }
 
         return;
@@ -443,8 +592,9 @@ export class BaoVerifier {
     const timeoutId = setTimeout(() => controller.abort(), this.config.requestTimeout);
 
     // Combine with main abort controller
+    let combined: CombinedAbortSignal | null = null;
     const signal = this.abortController
-      ? combineAbortSignals(this.abortController.signal, controller.signal)
+      ? (combined = combineAbortSignals(this.abortController.signal, controller.signal)).signal
       : controller.signal;
 
     try {
@@ -467,6 +617,10 @@ export class BaoVerifier {
       return new Uint8Array(buffer);
     } finally {
       clearTimeout(timeoutId);
+      // Clean up abort signal listeners to prevent memory leaks
+      if (combined) {
+        combined.cleanup();
+      }
     }
   }
 
@@ -643,6 +797,75 @@ export class BaoVerifier {
   }
 
   /**
+   * Stream verified data to an output stream with memory-efficient chunk handling.
+   *
+   * This method writes chunks sequentially to the provided stream and frees
+   * memory as chunks are written, keeping only a small buffer. Use this for
+   * large files to avoid holding all data in memory.
+   *
+   * @param outputStream - Writable stream to write data to
+   * @param freeMemory - If true, delete chunks from memory after writing (default: true)
+   * @throws {BaoVerifierError} If verification is not complete or chunks are missing
+   *
+   * @example
+   * ```typescript
+   * import { createWriteStream } from 'node:fs';
+   *
+   * const verifier = new BaoVerifier(config);
+   * await verifier.start();
+   *
+   * const output = createWriteStream('output.dat');
+   * await verifier.streamToOutput(output);
+   * ```
+   */
+  async streamToOutput(outputStream: WritableStream, freeMemory: boolean = true): Promise<void> {
+    if (this.status !== 'complete') {
+      throw new BaoVerifierError(
+        'Cannot stream output: verification not complete',
+        'INVALID_STATE'
+      );
+    }
+
+    let nextChunkToWrite = 0;
+
+    while (nextChunkToWrite < this.totalChunks) {
+      const chunk = this.chunkData.get(nextChunkToWrite);
+      if (!chunk) {
+        throw new BaoVerifierError(
+          `Missing chunk ${nextChunkToWrite} for streaming`,
+          'VERIFICATION_FAILED'
+        );
+      }
+
+      // Write chunk to stream
+      const writeResult = outputStream.write(chunk);
+      if (writeResult instanceof Promise) {
+        await writeResult;
+      }
+
+      // Free memory if requested, keeping a buffer for potential re-reads
+      if (freeMemory && nextChunkToWrite >= STREAM_BUFFER_SIZE) {
+        this.chunkData.delete(nextChunkToWrite - STREAM_BUFFER_SIZE);
+      }
+
+      nextChunkToWrite++;
+    }
+
+    // Clean up remaining buffered chunks if freeing memory
+    if (freeMemory) {
+      for (let i = Math.max(0, this.totalChunks - STREAM_BUFFER_SIZE); i < this.totalChunks; i++) {
+        this.chunkData.delete(i);
+      }
+    }
+
+    // End the stream
+    const endResult = outputStream.end();
+    if (endResult instanceof Promise) {
+      await endResult;
+    }
+  }
+
+  /**
    * Convert hex string to bytes.
    */
   private hexToBytes(hex: string): Uint8Array {
@@ -696,18 +919,42 @@ export class BaoVerifier {
 }
 
 /**
- * Combine multiple AbortSignals into one.
+ * Result of combining abort signals.
  */
-function combineAbortSignals(...signals: AbortSignal[]): AbortSignal {
+interface CombinedAbortSignal {
+  /** The combined signal */
+  signal: AbortSignal;
+  /** Cleanup function to remove event listeners */
+  cleanup: () => void;
+}
+
+/**
+ * Combine multiple AbortSignals into one with proper cleanup.
+ * Returns both the combined signal and a cleanup function to prevent memory leaks.
+ */
+function combineAbortSignals(...signals: AbortSignal[]): CombinedAbortSignal {
   const controller = new AbortController();
+  const handlers: Array<{ signal: AbortSignal; handler: () => void }> = [];
 
   for (const signal of signals) {
     if (signal.aborted) {
       controller.abort();
       break;
     }
-    signal.addEventListener('abort', () => controller.abort(), { once: true });
+    const handler = () => controller.abort();
+    signal.addEventListener('abort', handler);
+    handlers.push({ signal, handler });
   }
 
-  return controller.signal;
+  const cleanup = () => {
+    for (const { signal, handler } of handlers) {
+      signal.removeEventListener('abort', handler);
+    }
+    handlers.length = 0;
+  };
+
+  // Auto-cleanup if the controller itself aborts
+  controller.signal.addEventListener('abort', cleanup, { once: true });
+
+  return { signal: controller.signal, cleanup };
 }

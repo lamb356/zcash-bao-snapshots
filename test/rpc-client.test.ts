@@ -80,6 +80,7 @@ describe('ZcashRpcClient', () => {
 
   afterEach(() => {
     jest.clearAllMocks();
+    client.destroy();
   });
 
   describe('constructor', () => {
@@ -102,6 +103,7 @@ describe('ZcashRpcClient', () => {
       });
       // Client should be created without errors
       expect(minimalClient).toBeInstanceOf(ZcashRpcClient);
+      minimalClient.destroy();
     });
   });
 
@@ -124,6 +126,7 @@ describe('ZcashRpcClient', () => {
 
       const envClient = ZcashRpcClient.fromEnvironment('testnet');
       expect(envClient).toBeInstanceOf(ZcashRpcClient);
+      envClient.destroy();
     });
 
     it('should throw if RPC credentials not in environment', () => {
@@ -142,6 +145,7 @@ describe('ZcashRpcClient', () => {
       // This should work without specifying port
       const mainnetClient = ZcashRpcClient.fromEnvironment('mainnet');
       expect(mainnetClient).toBeInstanceOf(ZcashRpcClient);
+      mainnetClient.destroy();
     });
   });
 
