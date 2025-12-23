@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zcash Bao Snapshot Verifier</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #1a1a2e;
+      color: #eee;
+    }
+
+    h1 {
+      color: #f5a623;
+      margin-bottom: 10px;
+    }
+
+    .subtitle {
+      color: #888;
+      margin-bottom: 30px;
+    }
+
+    .card {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 5px;
+      color: #888;
+    }
+
+    input[type="text"], input[type="number"] {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #333;
+      border-radius: 4px;
+      background: #0f0f23;
+      color: #eee;
+      font-family: monospace;
+      margin-bottom: 15px;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: #f5a623;
+    }
+
+    button {
+      background: #f5a623;
+      color: #1a1a2e;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    button:hover {
+      background: #ffb84d;
+    }
+
+    button:disabled {
+      background: #666;
+      cursor: not-allowed;
+    }
+
+    .progress-container {
+      margin-top: 20px;
+    }
+
+    .progress-bar {
+      height: 24px;
+      background: #0f0f23;
+      border-radius: 12px;
+      overflow: hidden;
+      margin-bottom: 10px;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #f5a623, #ff6b6b);
+      transition: width 0.3s ease;
+      border-radius: 12px;
+    }
+
+    .progress-text {
+      display: flex;
+      justify-content: space-between;
+      color: #888;
+      font-size: 14px;
+    }
+
+    .status {
+      padding: 15px;
+      border-radius: 4px;
+      margin-top: 20px;
+    }
+
+    .status.success {
+      background: #1a4d1a;
+      border: 1px solid #2d8a2d;
+    }
+
+    .status.error {
+      background: #4d1a1a;
+      border: 1px solid #8a2d2d;
+    }
+
+    .status.info {
+      background: #1a1a4d;
+      border: 1px solid #2d2d8a;
+    }
+
+    .metadata {
+      font-family: monospace;
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .controls {
+      display: flex;
+      gap: 10px;
+      margin-top: 15px;
+    }
+
+    .controls button {
+      flex: 1;
+    }
+
+    #pauseBtn {
+      background: #666;
+    }
+
+    #pauseBtn:hover:not(:disabled) {
+      background: #888;
+    }
+
+    .chunk-info {
+      font-size: 12px;
+      color: #666;
+      margin-top: 5px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Zcash Bao Snapshot Verifier</h1>
+  <p class="subtitle">Verified streaming download with BLAKE3 Bao</p>
+
+  <div class="card">
+    <label for="metadataUrl">Metadata URL</label>
+    <input type="text" id="metadataUrl" placeholder="https://example.com/snapshots/2000000.metadata.json" value="">
+
+    <label for="baseUrl">Or Base URL (without extension)</label>
+    <input type="text" id="baseUrl" placeholder="https://example.com/snapshots/2000000" value="">
+
+    <button id="startBtn" onclick="startVerification()">Start Verification</button>
+
+    <div class="controls" style="display: none;" id="controlsDiv">
+      <button id="pauseBtn" onclick="togglePause()">Pause</button>
+      <button id="abortBtn" onclick="abortVerification()">Abort</button>
+    </div>
+  </div>
+
+  <div class="card" id="progressCard" style="display: none;">
+    <h3 style="margin-top: 0;">Download Progress</h3>
+
+    <div class="progress-container">
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+      </div>
+      <div class="progress-text">
+        <span id="progressPercent">0%</span>
+        <span id="progressSpeed">0 KB/s</span>
+        <span id="progressEta">ETA: --</span>
+      </div>
+      <div class="chunk-info" id="chunkInfo">
+        Chunks: 0 / 0
+      </div>
+    </div>
+  </div>
+
+  <div id="statusDiv"></div>
+
+  <div class="card" id="resultCard" style="display: none;">
+    <h3 style="margin-top: 0;">Verification Result</h3>
+    <div class="metadata" id="resultContent"></div>
+  </div>
+
+  <script type="module">
+    // Import from CDN or local build
+    // For production, use: import { ... } from 'zcash-bao-snapshots/verifier';
+
+    // For this example, we'll use the blake3-bao library directly
+    // since the full package may not be bundled for browser yet
+
+    import { baoEncode, baoDecode, PartialBao } from 'https://unpkg.com/blake3-bao@1.3.4/index.mjs';
+
+    // Make functions available globally for the HTML onclick handlers
+    window.baoEncode = baoEncode;
+    window.baoDecode = baoDecode;
+    window.PartialBao = PartialBao;
+
+    let currentVerifier = null;
+    let isPaused = false;
+
+    window.startVerification = async function() {
+      const metadataUrl = document.getElementById('metadataUrl').value.trim();
+      const baseUrl = document.getElementById('baseUrl').value.trim();
+
+      if (!metadataUrl && !baseUrl) {
+        showStatus('Please enter a metadata URL or base URL', 'error');
+        return;
+      }
+
+      const resolvedMetadataUrl = metadataUrl || `${baseUrl}.metadata.json`;
+
+      document.getElementById('startBtn').disabled = true;
+      document.getElementById('controlsDiv').style.display = 'flex';
+      document.getElementById('progressCard').style.display = 'block';
+      document.getElementById('resultCard').style.display = 'none';
+
+      showStatus('Fetching metadata...', 'info');
+
+      try {
+        // Fetch metadata
+        const metadataResponse = await fetch(resolvedMetadataUrl);
+        if (!metadataResponse.ok) {
+          throw new Error(`Failed to fetch metadata: ${metadataResponse.status}`);
+        }
+
+        const metadata = await metadataResponse.json();
+        showStatus(`Metadata loaded. Height: ${metadata.height}, Size: ${formatBytes(metadata.originalSize)}`, 'info');
+
+        // Determine data URL
+        const base = baseUrl || metadataUrl.replace('.metadata.json', '');
+        const dataUrl = metadata.outboard ? `${base}.data` : `${base}.bao`;
+        const outboardUrl = metadata.outboard ? `${base}.bao` : null;
+
+        // Start downloading and verifying
+        await downloadAndVerify(dataUrl, outboardUrl, metadata);
+
+      } catch (error) {
+        showStatus(`Error: ${error.message}`, 'error');
+        resetUI();
+      }
+    };
+
+    async function downloadAndVerify(dataUrl, outboardUrl, metadata) {
+      const rootHashBytes = hexToBytes(metadata.rootHash);
+      const startTime = Date.now();
+
+      showStatus('Starting download...', 'info');
+
+      try {
+        // For combined mode, we need to download the .bao file
+        // For outboard mode, we need both the data and the outboard tree
+
+        if (metadata.outboard && outboardUrl) {
+          // Outboard mode
+          showStatus('Downloading data and outboard files...', 'info');
+
+          const [dataResponse, outboardResponse] = await Promise.all([
+            fetch(dataUrl),
+            fetch(outboardUrl)
+          ]);
+
+          if (!dataResponse.ok || !outboardResponse.ok) {
+            throw new Error('Failed to download files');
+          }
+
+          const data = new Uint8Array(await dataResponse.arrayBuffer());
+          const outboard = new Uint8Array(await outboardResponse.arrayBuffer());
+
+          updateProgress(50, data.length, metadata.originalSize, startTime);
+          showStatus('Verifying with outboard hash tree...', 'info');
+
+          // Verify using baoDecode with outboard
+          const result = await baoDecode(data, { outboard });
+
+          const actualHash = bytesToHex(result.hash);
+          if (actualHash !== metadata.rootHash.toLowerCase()) {
+            throw new Error(`Hash mismatch: expected ${metadata.rootHash}, got ${actualHash}`);
+          }
+
+          updateProgress(100, result.data.length, metadata.originalSize, startTime);
+          showSuccess(result.data, metadata, startTime);
+
+        } else {
+          // Combined mode - stream and verify chunks
+          showStatus('Downloading and verifying...', 'info');
+
+          const response = await fetch(dataUrl);
+          if (!response.ok) {
+            throw new Error(`Failed to download: ${response.status}`);
+          }
+
+          const reader = response.body.getReader();
+          const chunks = [];
+          let receivedBytes = 0;
+
+          while (true) {
+            const { done, value } = await reader.read();
+
+            if (done) break;
+
+            chunks.push(value);
+            receivedBytes += value.length;
+
+            const percent = (receivedBytes / metadata.encodedSize) * 100;
+            updateProgress(percent, receivedBytes, metadata.encodedSize, startTime);
+          }
+
+          // Combine chunks
+          const combined = new Uint8Array(receivedBytes);
+          let offset = 0;
+          for (const chunk of chunks) {
+            combined.set(chunk, offset);
+            offset += chunk.length;
+          }
+
+          showStatus('Verifying...', 'info');
+
+          // Verify the complete data
+          const result = await baoDecode(combined);
+
+          const actualHash = bytesToHex(result.hash);
+          if (actualHash !== metadata.rootHash.toLowerCase()) {
+            throw new Error(`Hash mismatch: expected ${metadata.rootHash}, got ${actualHash}`);
+          }
+
+          updateProgress(100, result.data.length, metadata.originalSize, startTime);
+          showSuccess(result.data, metadata, startTime);
+        }
+
+      } catch (error) {
+        showStatus(`Verification failed: ${error.message}`, 'error');
+        resetUI();
+      }
+    }
+
+    function showSuccess(data, metadata, startTime) {
+      const elapsed = Date.now() - startTime;
+      const speed = data.length / (elapsed / 1000);
+
+      showStatus('Verification successful!', 'success');
+
+      document.getElementById('resultCard').style.display = 'block';
+      document.getElementById('resultContent').textContent = `
+Verified Data:
+  Size: ${formatBytes(data.length)}
+  Expected: ${formatBytes(metadata.originalSize)}
+  Match: ${data.length === metadata.originalSize ? 'Yes' : 'No - Size mismatch!'}
+
+Performance:
+  Time: ${(elapsed / 1000).toFixed(2)}s
+  Speed: ${formatBytes(speed)}/s
+
+Metadata:
+  Network: ${metadata.network}
+  Height: ${metadata.height}
+  Block Hash: ${metadata.hash}
+  Root Hash: ${metadata.rootHash}
+  Created: ${metadata.createdAt}
+`;
+
+      resetUI();
+    }
+
+    function updateProgress(percent, downloaded, total, startTime) {
+      const elapsed = (Date.now() - startTime) / 1000;
+      const speed = downloaded / elapsed;
+      const remaining = total - downloaded;
+      const eta = remaining / speed;
+
+      document.getElementById('progressFill').style.width = `${percent}%`;
+      document.getElementById('progressPercent').textContent = `${percent.toFixed(1)}%`;
+      document.getElementById('progressSpeed').textContent = `${formatBytes(speed)}/s`;
+      document.getElementById('progressEta').textContent = `ETA: ${formatTime(eta)}`;
+      document.getElementById('chunkInfo').textContent = `Downloaded: ${formatBytes(downloaded)} / ${formatBytes(total)}`;
+    }
+
+    window.togglePause = function() {
+      isPaused = !isPaused;
+      document.getElementById('pauseBtn').textContent = isPaused ? 'Resume' : 'Pause';
+      showStatus(isPaused ? 'Paused' : 'Resumed', 'info');
+    };
+
+    window.abortVerification = function() {
+      if (currentVerifier) {
+        currentVerifier.abort();
+      }
+      showStatus('Aborted', 'error');
+      resetUI();
+    };
+
+    function showStatus(message, type) {
+      const div = document.getElementById('statusDiv');
+      div.innerHTML = `<div class="status ${type}">${message}</div>`;
+    }
+
+    function resetUI() {
+      document.getElementById('startBtn').disabled = false;
+      document.getElementById('controlsDiv').style.display = 'none';
+      isPaused = false;
+      document.getElementById('pauseBtn').textContent = 'Pause';
+    }
+
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(1024));
+      return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${units[i]}`;
+    }
+
+    function formatTime(seconds) {
+      if (!isFinite(seconds) || seconds < 0) return '--';
+      if (seconds < 60) return `${Math.ceil(seconds)}s`;
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.ceil(seconds % 60);
+      return `${mins}m ${secs}s`;
+    }
+
+    function hexToBytes(hex) {
+      const bytes = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < hex.length; i += 2) {
+        bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+      }
+      return bytes;
+    }
+
+    function bytesToHex(bytes) {
+      return Array.from(bytes)
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+    }
+  </script>
+</body>
+</html>
