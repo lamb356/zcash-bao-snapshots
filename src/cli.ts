@@ -15,7 +15,7 @@ import { parseArgs } from 'node:util';
 import { readFile, stat, readdir } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { createServer } from 'node:http';
-import { join, extname } from 'node:path';
+import { join, extname, resolve, normalize, sep } from 'node:path';
 import { ZcashRpcClient, SnapshotGenerator, SnapshotError } from './generator/index.js';
 import { verifyBaoData, verifyBaoOutboard, BaoVerifierError } from './verifier/index.js';
 import type { SnapshotMetadata, ZcashNetwork, SnapshotProgress } from './types/index.js';
@@ -317,6 +317,17 @@ async function runGenerate(args: string[]): Promise<number> {
   if (isNaN(height) || height < 0) {
     logError('--height must be a non-negative integer');
     return 1;
+  }
+
+  if (height > Number.MAX_SAFE_INTEGER) {
+    logError('--height exceeds maximum safe integer value');
+    return 1;
+  }
+
+  // Warn for suspiciously high heights (Zcash mainnet is ~2.5M blocks as of 2024)
+  const MAX_REASONABLE_HEIGHT = 10_000_000;
+  if (height > MAX_REASONABLE_HEIGHT) {
+    logWarning(`Height ${height.toLocaleString()} seems unusually high. Current Zcash mainnet is ~3M blocks.`);
   }
 
   const network = values.network as ZcashNetwork;
@@ -631,6 +642,7 @@ interface ServeOptions {
   port: number;
   host: string;
   cors: boolean;
+  startTime: number;
 }
 
 async function runServe(args: string[]): Promise<number> {
@@ -668,6 +680,7 @@ async function runServe(args: string[]): Promise<number> {
     port,
     host: values.host ?? '0.0.0.0',
     cors: !values['no-cors'],
+    startTime: Date.now(),
   };
 
   // Verify directory exists
@@ -726,7 +739,6 @@ async function handleRequest(
   options: ServeOptions
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-  const pathname = decodeURIComponent(url.pathname);
 
   // Set CORS headers if enabled
   if (options.cors) {
@@ -750,12 +762,41 @@ async function handleRequest(
     return;
   }
 
-  // Prevent directory traversal
-  const safePath = pathname.replace(/\.\./g, '');
-  const filePath = join(options.dir, safePath);
+  // Health check endpoint
+  const decodedPath = decodeURIComponent(url.pathname);
+  if (decodedPath === '/health') {
+    const snapshots = await discoverSnapshots(options.dir);
+    const uptimeMs = Date.now() - options.startTime;
+    const health = {
+      status: 'healthy',
+      uptime: Math.floor(uptimeMs / 1000),
+      uptimeFormatted: formatUptime(uptimeMs),
+      snapshotCount: snapshots.length,
+    };
+    const body = JSON.stringify(health, null, 2);
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+      'Cache-Control': 'no-cache',
+    });
+    res.end(body);
+    return;
+  }
 
-  // Check if path is within the serve directory
-  if (!filePath.startsWith(options.dir)) {
+  // Secure path validation to prevent directory traversal
+  // 1. Normalize the serve directory to absolute path
+  const baseDir = resolve(normalize(options.dir));
+
+  // 2. Normalize the requested path (decodedPath already set above)
+  const normalizedPath = normalize(decodedPath);
+
+  // 3. Resolve the full path
+  const filePath = resolve(baseDir, '.' + normalizedPath);
+
+  // 4. Verify the resolved path is within the serve directory
+  // Ensure baseDir ends with separator for accurate prefix matching
+  const baseDirWithSep = baseDir.endsWith(sep) ? baseDir : baseDir + sep;
+  if (filePath !== baseDir && !filePath.startsWith(baseDirWithSep)) {
     res.writeHead(403, { 'Content-Type': 'text/plain' });
     res.end('Forbidden');
     return;
@@ -766,10 +807,10 @@ async function handleRequest(
 
     if (fileStat.isDirectory()) {
       // Serve index page at root, directory listing elsewhere
-      if (pathname === '/') {
+      if (decodedPath === '/') {
         await serveIndexPage(res, options.dir);
       } else {
-        await serveDirectoryListing(res, filePath, pathname);
+        await serveDirectoryListing(res, filePath, decodedPath);
       }
       return;
     }
@@ -1179,6 +1220,23 @@ function formatBytes(bytes: number): string {
   const value = bytes / Math.pow(1024, i);
 
   return `${value.toFixed(i === 0 ? 0 : 2)} ${units[i]}`;
+}
+
+function formatUptime(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) {
+    return `${days}d ${hours % 24}h ${minutes % 60}m`;
+  } else if (hours > 0) {
+    return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+  } else if (minutes > 0) {
+    return `${minutes}m ${seconds % 60}s`;
+  } else {
+    return `${seconds}s`;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

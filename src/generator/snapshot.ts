@@ -487,6 +487,7 @@ export class SnapshotGenerator {
 
   /**
    * Report progress to callback.
+   * Logs errors instead of silently swallowing them.
    */
   private reportProgress(
     callback: SnapshotProgressCallback,
@@ -494,8 +495,12 @@ export class SnapshotGenerator {
   ): void {
     try {
       callback(progress);
-    } catch {
-      // Ignore errors in progress callback
+    } catch (error) {
+      // Log the error but don't let it interrupt snapshot generation
+      console.error(
+        `[SnapshotGenerator] Progress callback error during ${progress.phase}:`,
+        error instanceof Error ? error.message : String(error)
+      );
     }
   }
 }

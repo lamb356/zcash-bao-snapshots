@@ -121,11 +121,14 @@ export async function verifyBao(options: VerifyBaoOptions): Promise<Uint8Array> 
  * @returns The verified and decoded content
  * @throws {BaoVerifierError} If verification fails
  */
+// Regex for validating 64-character hex strings (BLAKE3 hash)
+const HEX_HASH_REGEX = /^[0-9a-fA-F]{64}$/;
+
 export async function verifyBaoData(
   encodedData: Uint8Array,
   rootHash: string
 ): Promise<Uint8Array> {
-  if (!rootHash || rootHash.length !== 64) {
+  if (!rootHash || !HEX_HASH_REGEX.test(rootHash)) {
     throw new BaoVerifierError(
       'Valid root hash (64 hex chars) is required',
       'INVALID_ROOT_HASH'
@@ -172,7 +175,7 @@ export async function verifyBaoOutboard(
   outboard: Uint8Array,
   rootHash: string
 ): Promise<Uint8Array> {
-  if (!rootHash || rootHash.length !== 64) {
+  if (!rootHash || !HEX_HASH_REGEX.test(rootHash)) {
     throw new BaoVerifierError(
       'Valid root hash (64 hex chars) is required',
       'INVALID_ROOT_HASH'
