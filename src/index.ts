@@ -123,3 +123,18 @@ export type {
   BaoVerifierErrorCode,
   VerifyBaoOptions,
 } from './verifier/index.js';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Metrics
+// ─────────────────────────────────────────────────────────────────────────────
+
+export { Metrics, metrics } from './metrics/index.js';
+
+export type {
+  WorkerThreadMetrics,
+  AdaptiveConcurrencyMetrics,
+  CompressionMetrics,
+  DownloadMetrics,
+  ServerMetrics,
+  MetricsSnapshot,
+} from './metrics/index.js';

@@ -9,6 +9,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { baoEncode, baoEncodeIroh } from 'blake3-bao';
+import { metrics } from '../metrics/index.js';
 import type { TreeState } from '../types/zcash.js';
 import type {
   SnapshotMetadata,
@@ -532,6 +533,9 @@ export class SnapshotGenerator {
     mode: BaoEncodingMode,
     irohCompatible: boolean
   ): Promise<BaoEncodeResult> {
+    const startTime = Date.now();
+    const dataSize = data.length;
+
     return new Promise((resolve, reject) => {
       const workerPath = getWorkerPath();
 
@@ -549,6 +553,10 @@ export class SnapshotGenerator {
 
       worker.on('message', (result: WorkerOutput) => {
         worker.terminate();
+
+        // Record worker thread metrics
+        const duration = Date.now() - startTime;
+        metrics.recordWorkerUsage(dataSize, duration);
 
         if (!result.success) {
           reject(new Error(result.error ?? 'Worker encoding failed'));
@@ -574,6 +582,9 @@ export class SnapshotGenerator {
 
       worker.on('error', (err) => {
         worker.terminate();
+        // Record worker usage even on error
+        const duration = Date.now() - startTime;
+        metrics.recordWorkerUsage(dataSize, duration);
         reject(err);
       });
 

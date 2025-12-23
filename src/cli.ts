@@ -20,6 +20,7 @@ import { pipeline } from 'node:stream/promises';
 import { join, extname, resolve, normalize, sep } from 'node:path';
 import { ZcashRpcClient, SnapshotGenerator, SnapshotError } from './generator/index.js';
 import { verifyBaoData, verifyBaoOutboard, BaoVerifierError } from './verifier/index.js';
+import { metrics } from './metrics/index.js';
 import type { SnapshotMetadata, ZcashNetwork, SnapshotProgress } from './types/index.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
@@ -227,6 +228,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --port <number>   HTTP port (default: 3000)
   --host <host>     Host to bind to (default: 0.0.0.0)
   --no-cors         Disable CORS headers (enabled by default)
+  --metrics         Enable /metrics endpoint for performance stats
   --help            Show this help message
 
 ${colors.bold}FEATURES${colors.reset}
@@ -235,13 +237,14 @@ ${colors.bold}FEATURES${colors.reset}
   - HTTP Range request support for partial downloads
   - CORS enabled by default for browser access
   - Proper Content-Type headers for .bao, .json, .data files
+  - Optional /metrics endpoint for monitoring
 
 ${colors.bold}EXAMPLES${colors.reset}
   ${colors.dim}# Serve on default port 3000${colors.reset}
   zcash-bao serve --dir ./snapshots
 
-  ${colors.dim}# Custom port${colors.reset}
-  zcash-bao serve --dir ./snapshots --port 8080
+  ${colors.dim}# Custom port with metrics${colors.reset}
+  zcash-bao serve --dir ./snapshots --port 8080 --metrics
 `;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -644,6 +647,7 @@ interface ServeOptions {
   port: number;
   host: string;
   cors: boolean;
+  metricsEnabled: boolean;
   startTime: number;
 }
 
@@ -655,6 +659,7 @@ async function runServe(args: string[]): Promise<number> {
       port: { type: 'string', default: '3000' },
       host: { type: 'string', default: '0.0.0.0' },
       'no-cors': { type: 'boolean', default: false },
+      metrics: { type: 'boolean', default: false },
       help: { type: 'boolean', default: false },
     },
     strict: true,
@@ -682,8 +687,12 @@ async function runServe(args: string[]): Promise<number> {
     port,
     host: values.host ?? '0.0.0.0',
     cors: !values['no-cors'],
+    metricsEnabled: values.metrics ?? false,
     startTime: Date.now(),
   };
+
+  // Start server metrics tracking
+  metrics.startServer();
 
   // Verify directory exists
   try {
@@ -713,6 +722,7 @@ async function runServe(args: string[]): Promise<number> {
       logInfo('Directory', options.dir);
       logInfo('URL', `http://${options.host === '0.0.0.0' ? 'localhost' : options.host}:${port}`);
       logInfo('CORS', options.cors ? 'enabled' : 'disabled');
+      logInfo('Metrics', options.metricsEnabled ? 'enabled at /metrics' : 'disabled');
       log('');
       log(`${colors.dim}Press Ctrl+C to stop${colors.reset}`);
     });
@@ -785,6 +795,19 @@ async function handleRequest(
     return;
   }
 
+  // Metrics endpoint (if enabled)
+  if (decodedPath === '/metrics' && options.metricsEnabled) {
+    const metricsData = metrics.getMetrics();
+    const body = JSON.stringify(metricsData, null, 2);
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+      'Cache-Control': 'no-cache',
+    });
+    res.end(body);
+    return;
+  }
+
   // Secure path validation to prevent directory traversal
   // 1. Normalize the serve directory to absolute path
   const baseDir = resolve(normalize(options.dir));
@@ -819,12 +842,17 @@ async function handleRequest(
 
     // Serve file with range support
     await serveFile(req, res, filePath, fileStat.size);
+
+    // Record server metrics
+    metrics.recordServerRequest(fileStat.size);
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === 'ENOENT') {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not Found');
+      metrics.recordServerError();
     } else {
+      metrics.recordServerError();
       throw error;
     }
   }

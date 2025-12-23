@@ -7,6 +7,7 @@
 import { gzip, gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { PartialBao } from 'blake3-bao';
+import { metrics } from '../metrics/index.js';
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -489,10 +490,18 @@ export class BaoVerifier {
 
         if (speed > avgSpeed * CONCURRENCY_INCREASE_THRESHOLD) {
           // Speed is good, try increasing concurrency
-          this.activeConcurrency = Math.min(this.activeConcurrency + 1, this.config.concurrency);
+          const newLevel = Math.min(this.activeConcurrency + 1, this.config.concurrency);
+          if (newLevel > this.activeConcurrency) {
+            this.activeConcurrency = newLevel;
+            metrics.recordConcurrencyIncrease(newLevel);
+          }
         } else if (speed < avgSpeed * CONCURRENCY_DECREASE_THRESHOLD) {
           // Speed is degrading, reduce concurrency
-          this.activeConcurrency = Math.max(this.activeConcurrency - 1, 1);
+          const newLevel = Math.max(this.activeConcurrency - 1, 1);
+          if (newLevel < this.activeConcurrency) {
+            this.activeConcurrency = newLevel;
+            metrics.recordConcurrencyDecrease(newLevel);
+          }
         }
       }
     }
@@ -519,8 +528,18 @@ export class BaoVerifier {
         return;
       }
 
+      // Track retries
+      if (attempt > 0) {
+        metrics.recordRetry();
+      }
+
       try {
+        const fetchStartTime = Date.now();
         const data = await this.fetchRange(startOffset, endOffset - 1);
+        const fetchDuration = Date.now() - fetchStartTime;
+
+        // Record download metrics
+        metrics.recordDownload(data.length, fetchDuration);
 
         // Verify each chunk in the response
         for (let i = startChunkIndex; i < endChunk; i++) {
@@ -584,6 +603,9 @@ export class BaoVerifier {
         }
       }
     }
+
+    // Record failed request
+    metrics.recordFailedRequest();
 
     throw new BaoVerifierError(
       `Failed to download chunk ${startChunkIndex} after ${this.config.maxRetries} attempts`,
@@ -787,6 +809,9 @@ export class BaoVerifier {
       const chunkDataJson = JSON.stringify(state.chunkData);
       const compressed = await gzipAsync(Buffer.from(chunkDataJson, 'utf-8'));
       const compressedBase64 = compressed.toString('base64');
+
+      // Record compression metrics
+      metrics.recordCompression(chunkDataJson.length, compressedBase64.length);
 
       // Return state with compressed data and empty chunkData
       return {
