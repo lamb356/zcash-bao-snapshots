@@ -147,6 +147,13 @@ export interface SnapshotOptions {
    * Progress callback called during encoding.
    */
   readonly onProgress?: SnapshotProgressCallback;
+
+  /**
+   * Threshold in bytes for using worker thread encoding.
+   * Files larger than this will be encoded in a worker thread to avoid blocking.
+   * Default: 10MB (10_000_000 bytes).
+   */
+  readonly workerThreshold?: number;
 }
 
 /**

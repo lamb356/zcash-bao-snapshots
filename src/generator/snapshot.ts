@@ -23,9 +23,9 @@ import { SNAPSHOT_FORMAT_VERSION } from '../types/snapshot.js';
 import type { ZcashRpcClient } from './rpc-client.js';
 
 /**
- * Threshold for using worker thread encoding (10MB).
+ * Default threshold for using worker thread encoding (10MB).
  */
-const WORKER_THRESHOLD_BYTES = 10 * 1024 * 1024;
+const DEFAULT_WORKER_THRESHOLD_BYTES = 10 * 1024 * 1024;
 
 /**
  * Get the path to the worker script.
@@ -36,13 +36,14 @@ function getWorkerPath(): string {
 }
 
 /**
- * Worker output interface.
+ * Worker output interface using ArrayBuffer for zero-copy transfer.
  */
 interface WorkerOutput {
   success: boolean;
-  encodedBase64?: string;
-  hashBase64?: string;
-  dataBase64?: string;
+  /** Encoded data as ArrayBuffer (transferred, not copied) */
+  encodedBuffer?: ArrayBuffer;
+  /** Hash as ArrayBuffer (transferred, not copied) */
+  hashBuffer?: ArrayBuffer;
   error?: string;
 }
 
@@ -201,8 +202,9 @@ export class SnapshotGenerator {
     });
 
     let encodeResult: BaoEncodeResult;
+    const workerThreshold = options.workerThreshold ?? DEFAULT_WORKER_THRESHOLD_BYTES;
     try {
-      encodeResult = await this.baoEncodeData(serializedData, mode, irohCompatible);
+      encodeResult = await this.baoEncodeData(serializedData, mode, irohCompatible, workerThreshold);
     } catch (error) {
       const cause = error instanceof Error ? error : undefined;
       throw new SnapshotError(
@@ -470,15 +472,16 @@ export class SnapshotGenerator {
 
   /**
    * Bao encode data using the appropriate method.
-   * Uses worker thread for large files (> 10MB) to avoid blocking main thread.
+   * Uses worker thread for files larger than threshold to avoid blocking main thread.
    */
   private async baoEncodeData(
     data: Uint8Array,
     mode: BaoEncodingMode,
-    irohCompatible: boolean
+    irohCompatible: boolean,
+    workerThreshold: number
   ): Promise<BaoEncodeResult> {
     // Use worker thread for large data
-    if (data.length > WORKER_THRESHOLD_BYTES) {
+    if (data.length > workerThreshold) {
       return this.baoEncodeInWorker(data, mode, irohCompatible);
     }
 
@@ -522,6 +525,7 @@ export class SnapshotGenerator {
 
   /**
    * Bao encode data in a worker thread.
+   * Uses ArrayBuffer transfer for zero-copy performance.
    */
   private async baoEncodeInWorker(
     data: Uint8Array,
@@ -530,14 +534,17 @@ export class SnapshotGenerator {
   ): Promise<BaoEncodeResult> {
     return new Promise((resolve, reject) => {
       const workerPath = getWorkerPath();
-      const dataBase64 = Buffer.from(data).toString('base64');
+
+      // Copy data to a new ArrayBuffer that we can transfer ownership of
+      const dataBuffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
 
       const worker = new Worker(workerPath, {
         workerData: {
-          dataBase64,
+          dataBuffer,
           mode,
           irohCompatible,
         },
+        transferList: [dataBuffer],
       });
 
       worker.on('message', (result: WorkerOutput) => {
@@ -548,19 +555,19 @@ export class SnapshotGenerator {
           return;
         }
 
-        const encoded = Buffer.from(result.encodedBase64!, 'base64');
-        const hash = Buffer.from(result.hashBase64!, 'base64');
+        const encoded = new Uint8Array(result.encodedBuffer!);
+        const hash = new Uint8Array(result.hashBuffer!);
 
         if (mode === 'outboard') {
           resolve({
-            encoded: new Uint8Array(encoded),
-            hash: new Uint8Array(hash),
+            encoded,
+            hash,
             data,
           });
         } else {
           resolve({
-            encoded: new Uint8Array(encoded),
-            hash: new Uint8Array(hash),
+            encoded,
+            hash,
           });
         }
       });

@@ -205,11 +205,9 @@ export class BaoVerifier {
     const now = Date.now();
     const timeDiff = now - this.lastProgressTime;
 
+    // Return 0 if not enough time has passed to avoid noisy spikes
     if (timeDiff < 100) {
-      // Not enough time has passed, return cached speed
-      return this.lastBytesDownloaded > 0
-        ? ((this.bytesDownloaded - this.lastBytesDownloaded) / timeDiff) * 1000
-        : 0;
+      return 0;
     }
 
     const bytesDiff = this.bytesDownloaded - this.lastBytesDownloaded;
@@ -470,8 +468,8 @@ export class BaoVerifier {
         this.speedHistory.shift();
       }
 
-      // Only adjust after we have enough samples
-      if (this.speedHistory.length >= 3) {
+      // Only adjust after we have enough samples (5 minimum for stability)
+      if (this.speedHistory.length >= 5) {
         const avgSpeed = this.speedHistory.reduce((a, b) => a + b, 0) / this.speedHistory.length;
 
         if (speed > avgSpeed * CONCURRENCY_INCREASE_THRESHOLD) {
@@ -820,6 +818,14 @@ export class BaoVerifier {
       throw new BaoVerifierError(
         'Cannot stream output: verification not complete',
         'INVALID_STATE'
+      );
+    }
+
+    // Verify all chunks are present before starting to stream
+    if (this.chunkData.size !== this.totalChunks) {
+      throw new BaoVerifierError(
+        `Missing chunks: expected ${this.totalChunks}, have ${this.chunkData.size}`,
+        'VERIFICATION_FAILED'
       );
     }
 

@@ -11,8 +11,8 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { baoEncode, baoEncodeIroh } from 'blake3-bao';
 
 interface WorkerInput {
-  /** The data to encode as a base64 string */
-  dataBase64: string;
+  /** The data to encode as ArrayBuffer (transferred, not copied) */
+  dataBuffer: ArrayBuffer;
   /** Encoding mode: 'combined' or 'outboard' */
   mode: 'combined' | 'outboard';
   /** Whether to use Iroh-compatible encoding */
@@ -22,12 +22,10 @@ interface WorkerInput {
 interface WorkerOutput {
   /** Whether the operation succeeded */
   success: boolean;
-  /** The encoded data (combined mode) or outboard hash tree (outboard mode) as base64 */
-  encodedBase64?: string;
-  /** The BLAKE3 Bao root hash as base64 */
-  hashBase64?: string;
-  /** The original data as base64 (only in outboard mode) */
-  dataBase64?: string;
+  /** The encoded data as ArrayBuffer (transferred, not copied) */
+  encodedBuffer?: ArrayBuffer;
+  /** The BLAKE3 Bao root hash as ArrayBuffer (transferred, not copied) */
+  hashBuffer?: ArrayBuffer;
   /** Error message if failed */
   error?: string;
 }
@@ -40,40 +38,55 @@ async function runWorker(): Promise<void> {
   const input = workerData as WorkerInput;
 
   try {
-    // Decode input data from base64
-    const data = Buffer.from(input.dataBase64, 'base64');
+    // Use the transferred ArrayBuffer directly
+    const data = new Uint8Array(input.dataBuffer);
 
-    let result: WorkerOutput;
+    let encodedBuffer: ArrayBuffer;
+    let hashBuffer: ArrayBuffer;
 
     if (input.mode === 'outboard' && input.irohCompatible) {
       // Use Iroh-compatible encoding (16KB chunk groups)
       const encoded = await baoEncodeIroh(data);
-      result = {
-        success: true,
-        encodedBase64: Buffer.from(encoded.outboard).toString('base64'),
-        hashBase64: Buffer.from(encoded.hash).toString('base64'),
-        dataBase64: input.dataBase64,
-      };
+      encodedBuffer = encoded.outboard.buffer.slice(
+        encoded.outboard.byteOffset,
+        encoded.outboard.byteOffset + encoded.outboard.byteLength
+      );
+      hashBuffer = encoded.hash.buffer.slice(
+        encoded.hash.byteOffset,
+        encoded.hash.byteOffset + encoded.hash.byteLength
+      );
     } else if (input.mode === 'outboard') {
       // Standard outboard encoding
       const encoded = await baoEncode(data, { outboard: true });
-      result = {
-        success: true,
-        encodedBase64: Buffer.from(encoded.outboard).toString('base64'),
-        hashBase64: Buffer.from(encoded.hash).toString('base64'),
-        dataBase64: input.dataBase64,
-      };
+      encodedBuffer = encoded.outboard.buffer.slice(
+        encoded.outboard.byteOffset,
+        encoded.outboard.byteOffset + encoded.outboard.byteLength
+      );
+      hashBuffer = encoded.hash.buffer.slice(
+        encoded.hash.byteOffset,
+        encoded.hash.byteOffset + encoded.hash.byteLength
+      );
     } else {
       // Combined mode (default)
       const encoded = await baoEncode(data);
-      result = {
-        success: true,
-        encodedBase64: Buffer.from(encoded.encoded).toString('base64'),
-        hashBase64: Buffer.from(encoded.hash).toString('base64'),
-      };
+      encodedBuffer = encoded.encoded.buffer.slice(
+        encoded.encoded.byteOffset,
+        encoded.encoded.byteOffset + encoded.encoded.byteLength
+      );
+      hashBuffer = encoded.hash.buffer.slice(
+        encoded.hash.byteOffset,
+        encoded.hash.byteOffset + encoded.hash.byteLength
+      );
     }
 
-    parentPort.postMessage(result);
+    const result: WorkerOutput = {
+      success: true,
+      encodedBuffer,
+      hashBuffer,
+    };
+
+    // Transfer ownership of the buffers back to main thread
+    parentPort.postMessage(result, [encodedBuffer, hashBuffer]);
   } catch (error) {
     const result: WorkerOutput = {
       success: false,
