@@ -4,7 +4,12 @@
  * @packageDocumentation
  */
 
+import { gzip, gunzip } from 'node:zlib';
+import { promisify } from 'node:util';
 import { PartialBao } from 'blake3-bao';
+
+const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
 import type {
   BaoVerifierConfig,
   BaoVerifierEvents,
@@ -53,6 +58,16 @@ const CONCURRENCY_DECREASE_THRESHOLD = 0.8;
  * Number of chunks to buffer before streaming output.
  */
 const STREAM_BUFFER_SIZE = 10;
+
+/**
+ * Number of chunks to prefetch ahead during streaming.
+ */
+const PREFETCH_SIZE = 3;
+
+/**
+ * Threshold for compressing state JSON (1MB).
+ */
+const STATE_COMPRESSION_THRESHOLD = 1024 * 1024;
 
 /**
  * Generic writable stream interface for streaming output.
@@ -738,6 +753,7 @@ export class BaoVerifier {
 
   /**
    * Save state to storage adapter.
+   * Compresses state if it exceeds STATE_COMPRESSION_THRESHOLD.
    */
   private async saveState(): Promise<void> {
     if (!this.config.storage) {
@@ -746,7 +762,8 @@ export class BaoVerifier {
 
     try {
       const state = this.exportState();
-      await this.config.storage.save(this.stateKey, state);
+      const stateToSave = await this.compressStateIfNeeded(state);
+      await this.config.storage.save(this.stateKey, stateToSave);
     } catch (error) {
       // Log but don't fail
       console.warn('Failed to save verifier state:', error);
@@ -754,7 +771,38 @@ export class BaoVerifier {
   }
 
   /**
+   * Compress state if JSON size exceeds threshold.
+   * Returns original state if below threshold or compression fails.
+   */
+  private async compressStateIfNeeded(state: VerifierState): Promise<VerifierState> {
+    const stateJson = JSON.stringify(state);
+
+    // Only compress if above threshold
+    if (stateJson.length <= STATE_COMPRESSION_THRESHOLD) {
+      return state;
+    }
+
+    try {
+      // Compress the chunkData portion which is the largest part
+      const chunkDataJson = JSON.stringify(state.chunkData);
+      const compressed = await gzipAsync(Buffer.from(chunkDataJson, 'utf-8'));
+      const compressedBase64 = compressed.toString('base64');
+
+      // Return state with compressed data and empty chunkData
+      return {
+        ...state,
+        chunkData: {},
+        compressedData: compressedBase64,
+      };
+    } catch {
+      // Compression failed, return original state
+      return state;
+    }
+  }
+
+  /**
    * Restore state from storage adapter.
+   * Decompresses state if it was stored compressed.
    */
   private async restoreState(): Promise<void> {
     if (!this.config.storage) {
@@ -764,11 +812,39 @@ export class BaoVerifier {
     try {
       const state = await this.config.storage.load(this.stateKey);
       if (state) {
-        this.importState(state);
+        const decompressedState = await this.decompressStateIfNeeded(state);
+        this.importState(decompressedState);
       }
     } catch (error) {
       // Log but don't fail - start fresh
       console.warn('Failed to restore verifier state:', error);
+    }
+  }
+
+  /**
+   * Decompress state if it was stored compressed.
+   * Returns original state if not compressed or decompression fails.
+   */
+  private async decompressStateIfNeeded(state: VerifierState): Promise<VerifierState> {
+    if (!state.compressedData) {
+      return state;
+    }
+
+    try {
+      const compressedBuffer = Buffer.from(state.compressedData, 'base64');
+      const decompressed = await gunzipAsync(compressedBuffer);
+      const chunkData = JSON.parse(decompressed.toString('utf-8')) as Record<number, string>;
+
+      // Return state with restored chunkData and no compressedData
+      const { compressedData: _, ...rest } = state;
+      return {
+        ...rest,
+        chunkData,
+      };
+    } catch {
+      // Decompression failed, return original state
+      console.warn('Failed to decompress state, using as-is');
+      return state;
     }
   }
 
@@ -830,20 +906,48 @@ export class BaoVerifier {
     }
 
     let nextChunkToWrite = 0;
+    const prefetchPromises: Map<number, Promise<void>> = new Map();
 
     while (nextChunkToWrite < this.totalChunks) {
-      const chunk = this.chunkData.get(nextChunkToWrite);
-      if (!chunk) {
-        throw new BaoVerifierError(
-          `Missing chunk ${nextChunkToWrite} for streaming`,
-          'VERIFICATION_FAILED'
-        );
+      // Prefetch upcoming chunks (for future streaming-during-download support)
+      for (let offset = 1; offset <= PREFETCH_SIZE; offset++) {
+        const prefetchIndex = nextChunkToWrite + offset;
+        if (prefetchIndex < this.totalChunks &&
+            !this.chunkData.has(prefetchIndex) &&
+            !prefetchPromises.has(prefetchIndex) &&
+            !this.pendingChunks.has(prefetchIndex)) {
+          // Trigger prefetch for missing chunks
+          const prefetchPromise = this.prefetchChunk(prefetchIndex);
+          prefetchPromises.set(prefetchIndex, prefetchPromise);
+          prefetchPromise.finally(() => prefetchPromises.delete(prefetchIndex));
+        }
       }
 
-      // Write chunk to stream
-      const writeResult = outputStream.write(chunk);
-      if (writeResult instanceof Promise) {
-        await writeResult;
+      const chunk = this.chunkData.get(nextChunkToWrite);
+      if (!chunk) {
+        // Wait for prefetch if chunk is being fetched
+        const pendingPrefetch = prefetchPromises.get(nextChunkToWrite);
+        if (pendingPrefetch) {
+          await pendingPrefetch;
+        }
+        const retryChunk = this.chunkData.get(nextChunkToWrite);
+        if (!retryChunk) {
+          throw new BaoVerifierError(
+            `Missing chunk ${nextChunkToWrite} for streaming`,
+            'VERIFICATION_FAILED'
+          );
+        }
+        // Write the retried chunk
+        const writeResult = outputStream.write(retryChunk);
+        if (writeResult instanceof Promise) {
+          await writeResult;
+        }
+      } else {
+        // Write chunk to stream
+        const writeResult = outputStream.write(chunk);
+        if (writeResult instanceof Promise) {
+          await writeResult;
+        }
       }
 
       // Free memory if requested, keeping a buffer for potential re-reads
@@ -866,6 +970,20 @@ export class BaoVerifier {
     if (endResult instanceof Promise) {
       await endResult;
     }
+  }
+
+  /**
+   * Prefetch a single chunk (no-op if already present or pending).
+   * Used by streamToOutput for ahead-of-time fetching.
+   */
+  private async prefetchChunk(chunkIndex: number): Promise<void> {
+    if (this.chunkData.has(chunkIndex) || this.pendingChunks.has(chunkIndex)) {
+      return;
+    }
+
+    // For now, this is a placeholder for future streaming-during-download support
+    // When status is 'complete', all chunks should already be present
+    // This method would trigger actual downloads when used during active download
   }
 
   /**

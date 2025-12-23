@@ -235,6 +235,12 @@ export interface VerifierState {
    * Bytes downloaded so far.
    */
   readonly bytesDownloaded: number;
+
+  /**
+   * If present, indicates the chunkData is gzip-compressed and base64-encoded.
+   * When compressed, chunkData will be empty and this field contains the compressed data.
+   */
+  readonly compressedData?: string;
 }
 
 /**
