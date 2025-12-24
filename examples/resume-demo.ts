@@ -508,6 +508,25 @@ Bao Verified Streaming:
   ✅ Works with CDN, IPFS, BitTorrent, any HTTP
   ✅ Malicious server → corruption detected and rejected
 `);
+
+  console.log('='.repeat(60));
+  console.log('REAL-WORLD IMPACT AT SCALE');
+  console.log('='.repeat(60));
+  console.log(`
+Demo: ${formatBytes(DATA_SIZE)} in ${testData.numGroups} chunk groups
+
+Actual Zcash data sizes:
+  - Tree state: ~1-10 KB (small, one-time)
+  - Compact blocks: ~5 GB+ (large, ongoing sync)
+
+Where Bao shines at scale:
+  📱 Mobile on 4G: connection drops → resumes instantly
+  🏢 Corporate firewall: kills long connections → resumes
+  🌐 CDN edge caching: 99% cache hit rate possible
+  🗺️  Geographic redundancy: switch regions mid-download
+  👥 Community mirrors: anyone can host safely
+  🔒 Zero trust: malicious mirrors detected and rejected
+`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
