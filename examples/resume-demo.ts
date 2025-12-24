@@ -26,9 +26,11 @@ import { baoEncodeIroh, PartialBao, countChunkGroups } from 'blake3-bao';
 
 const PORT_A = 3001;
 const PORT_B = 3002;
+const PORT_C = 3003; // Malicious server
 const DATA_SIZE = 64 * 1024; // 64 KB of test data (4 chunk groups)
 const CHUNK_GROUP_SIZE = 16 * 1024; // 16KB per chunk group (Iroh-compatible)
 const ABORT_AT_GROUP = 2; // Stop after downloading 2 of 4 groups (50%)
+const MALICIOUS_GROUP = 3; // Group index where we test malicious server (0-indexed)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Utility Functions
@@ -159,6 +161,69 @@ function createDataServer(
   });
 }
 
+/**
+ * Create a malicious server that serves corrupted data (flipped bits).
+ */
+function createMaliciousServer(
+  port: number,
+  data: Uint8Array,
+  serverName: string
+): Promise<Server> {
+  // Create corrupted copy of data - flip bits throughout
+  const corruptedData = new Uint8Array(data);
+  for (let i = 0; i < corruptedData.length; i += 1024) {
+    corruptedData[i] ^= 0xff;
+    if (i + 1 < corruptedData.length) corruptedData[i + 1] ^= 0xaa;
+    if (i + 2 < corruptedData.length) corruptedData[i + 2] ^= 0x55;
+  }
+
+  return new Promise((resolve) => {
+    const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      const rangeHeader = req.headers.range;
+
+      if (!rangeHeader) {
+        res.writeHead(200, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': corruptedData.length,
+          'Accept-Ranges': 'bytes',
+        });
+        res.end(Buffer.from(corruptedData));
+        return;
+      }
+
+      const match = rangeHeader.match(/bytes=(\d+)-(\d+)?/);
+      if (!match) {
+        res.writeHead(400);
+        res.end('Invalid range');
+        return;
+      }
+
+      const start = parseInt(match[1], 10);
+      const end = match[2] ? parseInt(match[2], 10) : corruptedData.length - 1;
+
+      if (start >= corruptedData.length || end >= corruptedData.length || start > end) {
+        res.writeHead(416, { 'Content-Range': `bytes */${corruptedData.length}` });
+        res.end('Range not satisfiable');
+        return;
+      }
+
+      const chunk = corruptedData.slice(start, end + 1);
+      res.writeHead(206, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Range': `bytes ${start}-${end}/${corruptedData.length}`,
+        'Content-Length': chunk.length,
+        'Accept-Ranges': 'bytes',
+      });
+      res.end(Buffer.from(chunk));
+    });
+
+    server.listen(port, () => {
+      console.log(`  ${serverName} listening on port ${port} [MALICIOUS]`);
+      resolve(server);
+    });
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Chunk Group Fetching
 // ─────────────────────────────────────────────────────────────────────────────
@@ -253,7 +318,7 @@ async function phase1_DownloadFromServerA(
 async function phase2_ResumeFromServerB(
   testData: TestData,
   savedState: SavedDownloadState
-): Promise<Uint8Array> {
+): Promise<SavedDownloadState> {
   console.log('\n' + '='.repeat(60));
   console.log('PHASE 2: Resume from Server B');
   console.log('='.repeat(60));
@@ -269,36 +334,114 @@ async function phase2_ResumeFromServerB(
   const partial = PartialBao.importState(savedState.partialBaoState);
 
   const receivedBefore = partial.receivedGroups;
-  const remaining = testData.numGroups - receivedBefore;
 
   console.log(`  Resuming: ${receivedBefore}/${testData.numGroups} groups already verified`);
-  console.log(`  Remaining: ${remaining} groups to download\n`);
+  console.log(`  Downloading group ${receivedBefore + 1} from Server B...\n`);
 
   console.log('Resuming from Server B...');
 
-  // Download remaining chunk groups
-  for (let groupIndex = receivedBefore; groupIndex < testData.numGroups; groupIndex++) {
-    // Show progress
+  // Download just one group from Server B (group index 2)
+  const groupIndex = receivedBefore;
+  const percent = ((groupIndex + 1) / testData.numGroups) * 100;
+  process.stdout.write(
+    `\r  [${progressBar(groupIndex + 1, testData.numGroups)}] ` +
+    `${percent.toFixed(0)}% - Group ${groupIndex + 1}/${testData.numGroups}`
+  );
+
+  const groupData = await fetchChunkGroup(url, groupIndex, testData.original.length);
+  partial.addChunkGroupTrusted(groupIndex, groupData);
+  await sleep(200);
+
+  console.log('\n');
+  console.log(`  ✅ Downloaded group ${groupIndex + 1} from Server B`);
+
+  // Save state before testing malicious server
+  return {
+    partialBaoState: partial.exportState(),
+    downloadedGroups: [...savedState.downloadedGroups, groupIndex],
+  };
+}
+
+async function phase2_5_TestMaliciousServer(
+  testData: TestData,
+  savedState: SavedDownloadState
+): Promise<SavedDownloadState> {
+  console.log('\n' + '='.repeat(60));
+  console.log('PHASE 2.5: Test Malicious Server C');
+  console.log('='.repeat(60));
+
+  const urlC = `http://localhost:${PORT_C}/data`;
+  const urlB = `http://localhost:${PORT_B}/data`;
+
+  // Restore state
+  const partial = PartialBao.importState(savedState.partialBaoState);
+  const groupIndex = MALICIOUS_GROUP; // Group 3 (0-indexed), the 4th group
+
+  console.log(`\n  Attempting to download group ${groupIndex + 1} from Server C...`);
+  await sleep(300);
+
+  // Fetch corrupted data from malicious Server C
+  const corruptedData = await fetchChunkGroup(urlC, groupIndex, testData.original.length);
+
+  // Add the corrupted data
+  partial.addChunkGroupTrusted(groupIndex, corruptedData);
+
+  console.log(`  Received data from Server C, verifying...`);
+  await sleep(300);
+
+  // Try to finalize - this will fail due to corrupted data
+  let verificationFailed = false;
+  try {
+    partial.finalize();
+  } catch {
+    verificationFailed = true;
+  }
+
+  if (verificationFailed) {
+    console.log('\n  ⚠️  Server C sent corrupted data - verification failed!');
+    console.log('  Fetching from backup...');
+    await sleep(300);
+
+    // Restore state from before corruption
+    const cleanPartial = PartialBao.importState(savedState.partialBaoState);
+
+    // Fetch correct data from Server B
+    console.log(`\n  Downloading group ${groupIndex + 1} from Server B instead...`);
+    const correctData = await fetchChunkGroup(urlB, groupIndex, testData.original.length);
+    cleanPartial.addChunkGroupTrusted(groupIndex, correctData);
+
     const percent = ((groupIndex + 1) / testData.numGroups) * 100;
     process.stdout.write(
       `\r  [${progressBar(groupIndex + 1, testData.numGroups)}] ` +
-      `${percent.toFixed(0)}% - Group ${groupIndex + 1}/${testData.numGroups}`
+      `${percent.toFixed(0)}% - Group ${groupIndex + 1}/${testData.numGroups} (from Server B)`
     );
-
-    // Fetch from Server B and add chunk group
-    const groupData = await fetchChunkGroup(url, groupIndex, testData.original.length);
-    partial.addChunkGroupTrusted(groupIndex, groupData);
-
-    // Small delay to make progress visible
     await sleep(200);
-  }
 
-  console.log('\n');
+    console.log('\n');
+    console.log('  ✅ Correct data received from Server B');
+
+    return {
+      partialBaoState: cleanPartial.exportState(),
+      downloadedGroups: [...savedState.downloadedGroups, groupIndex],
+    };
+  } else {
+    // This shouldn't happen - corrupted data should fail verification
+    throw new Error('Expected verification to fail with corrupted data!');
+  }
+}
+
+async function phase2_6_CompleteDownload(
+  testData: TestData,
+  savedState: SavedDownloadState
+): Promise<Uint8Array> {
+  // All 4 groups should be complete at this point
+  const partial = PartialBao.importState(savedState.partialBaoState);
+
+  console.log(`\n  All ${partial.receivedGroups} groups downloaded and verified.`);
   console.log('  ✅ Verification complete! Data integrity confirmed.');
 
   // Finalize and return verified data
-  const verifiedData = partial.finalize();
-  return verifiedData;
+  return partial.finalize();
 }
 
 function phase3_VerifyResults(testData: TestData, downloadedData: Uint8Array): void {
@@ -323,10 +466,11 @@ function phase3_VerifyResults(testData: TestData, downloadedData: Uint8Array): v
 
   if (matches) {
     console.log('\n  ✅ Data verified! Downloaded content matches original exactly.');
-    console.log('\n  The data downloaded from Server A + Server B matches');
-    console.log('  the original exactly. Bao verification ensures that even');
-    console.log('  though we downloaded from TWO DIFFERENT untrusted sources,');
-    console.log('  the combined data is cryptographically verified.');
+    console.log('\n  The data downloaded from Servers A + B matches the original');
+    console.log('  exactly. Bao verification ensures that even though we');
+    console.log('  downloaded from MULTIPLE untrusted sources, and one server');
+    console.log('  (C) tried to inject corrupted data, the final data is');
+    console.log('  cryptographically verified and correct.');
   } else {
     console.log('\n  ❌ Verification failed - data does not match!');
     process.exit(1);
@@ -338,17 +482,20 @@ function phase3_VerifyResults(testData: TestData, downloadedData: Uint8Array): v
   console.log(`
 Key Takeaways:
   1. Downloaded first 50% from Server A (port ${PORT_A})
-  2. Simulated connection failure
-  3. Saved verifier state (verified chunks + Merkle tree state)
-  4. Resumed download from Server B (port ${PORT_B})
-  5. Bao verification confirmed data integrity
+  2. Simulated connection failure, saved verifier state
+  3. Resumed download from Server B (port ${PORT_B})
+  4. Server C (port ${PORT_C}) attempted to inject CORRUPTED data
+  5. Bao verification DETECTED the corruption and rejected it
+  6. Fell back to Server B for correct data
+  7. Final verification confirmed data integrity
 
 This demonstrates that with Bao encoding:
   - Any server can serve any chunk group
   - Chunk groups are verified independently via Merkle tree
   - You can switch servers mid-download
+  - MALICIOUS SERVERS CANNOT INJECT BAD DATA
+  - Corrupted chunks are detected and rejected
   - The final data is cryptographically verified
-  - Untrusted/unknown servers can safely serve data
 `);
 }
 
@@ -365,18 +512,24 @@ async function main(): Promise<void> {
   // Generate test data
   const testData = await generateTestData();
 
-  // Start both servers serving the original data (not encoded)
-  // The verification happens client-side using PartialBao
+  // Start all servers - A and B serve correct data, C serves corrupted data
   console.log('\nStarting HTTP servers...');
   const serverA = await createDataServer(PORT_A, testData.original, 'Server A');
   const serverB = await createDataServer(PORT_B, testData.original, 'Server B');
+  const serverC = await createMaliciousServer(PORT_C, testData.original, 'Server C');
 
   try {
     // Phase 1: Download from Server A until 50%
-    const savedState = await phase1_DownloadFromServerA(testData);
+    const stateAfterA = await phase1_DownloadFromServerA(testData);
 
-    // Phase 2: Resume from Server B
-    const downloadedData = await phase2_ResumeFromServerB(testData, savedState);
+    // Phase 2: Resume from Server B (download one more group)
+    const stateAfterB = await phase2_ResumeFromServerB(testData, stateAfterA);
+
+    // Phase 2.5: Try malicious Server C, detect corruption, fallback to B
+    const stateAfterC = await phase2_5_TestMaliciousServer(testData, stateAfterB);
+
+    // Phase 2.6: Complete the download
+    const downloadedData = await phase2_6_CompleteDownload(testData, stateAfterC);
 
     // Phase 3: Verify results
     phase3_VerifyResults(testData, downloadedData);
@@ -385,6 +538,7 @@ async function main(): Promise<void> {
     console.log('\nShutting down servers...');
     await new Promise<void>((resolve) => serverA.close(() => resolve()));
     await new Promise<void>((resolve) => serverB.close(() => resolve()));
+    await new Promise<void>((resolve) => serverC.close(() => resolve()));
     console.log('Done!\n');
   }
 }
