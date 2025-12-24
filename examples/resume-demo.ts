@@ -488,14 +488,25 @@ Key Takeaways:
   5. Bao verification DETECTED the corruption and rejected it
   6. Fell back to Server B for correct data
   7. Final verification confirmed data integrity
+`);
 
-This demonstrates that with Bao encoding:
-  - Any server can serve any chunk group
-  - Chunk groups are verified independently via Merkle tree
-  - You can switch servers mid-download
-  - MALICIOUS SERVERS CANNOT INJECT BAD DATA
-  - Corrupted chunks are detected and rejected
-  - The final data is cryptographically verified
+  console.log('='.repeat(60));
+  console.log('COMPARISON: Traditional gRPC vs Bao HTTP');
+  console.log('='.repeat(60));
+  console.log(`
+Traditional lightwalletd GetTreeState:
+  ❌ Connection drop at 50% → restart from 0%
+  ❌ Must reconnect to SAME server
+  ❌ Trust required: single point of failure
+  ❌ Cannot use CDN/caching infrastructure
+  ❌ Malicious server → corrupted data accepted
+
+Bao Verified Streaming:
+  ✅ Connection drop at 50% → resume from 50%
+  ✅ Can switch to ANY server with same data
+  ✅ Zero trust: cryptographic verification per chunk
+  ✅ Works with CDN, IPFS, BitTorrent, any HTTP
+  ✅ Malicious server → corruption detected and rejected
 `);
 }
 
