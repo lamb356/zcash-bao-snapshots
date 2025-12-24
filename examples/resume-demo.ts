@@ -480,6 +480,13 @@ function phase3_VerifyResults(testData: TestData, downloadedData: Uint8Array): v
   console.log('DEMO COMPLETE');
   console.log('='.repeat(60));
   console.log(`
+🔒 SECURITY DEMONSTRATION:
+  This demo proves Bao enables TRUSTLESS downloads:
+  - Server A could have been compromised after Phase 1
+  - Server C actively attempted to inject corrupted data
+  - Yet the final data is cryptographically verified
+  - Only the root hash (32 bytes) needs to be trusted
+
 Key Takeaways:
   1. Downloaded first 50% from Server A (port ${PORT_A})
   2. Simulated connection failure, saved verifier state
@@ -527,6 +534,32 @@ Where Bao shines at scale:
   👥 Community mirrors: anyone can host safely
   🔒 Zero trust: malicious mirrors detected and rejected
 `);
+
+  console.log('='.repeat(60));
+  console.log('ZCASH WALLET SYNC SCENARIO');
+  console.log('='.repeat(60));
+  console.log(`
+📍 Mainnet has ~5 GB of compact blocks
+
+WITHOUT Bao:
+  - Download from single server
+  - Connection drop = restart from beginning
+  - Must trust the server completely
+
+WITH Bao:
+  - Download from ANY server (CDN, mirror, P2P)
+  - Connection drop = resume from where you left off
+  - Cryptographic verification ensures integrity
+  - Switch servers mid-sync without losing progress
+`);
+}
+
+function printDemoTime(startTime: number): void {
+  const elapsed = (Date.now() - startTime) / 1000;
+  console.log('='.repeat(60));
+  console.log(`⏱️  Total demo time: ${elapsed.toFixed(2)}s`);
+  console.log('  (In production: resumability saves hours on slow networks)');
+  console.log('='.repeat(60));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -534,6 +567,7 @@ Where Bao shines at scale:
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  const demoStartTime = Date.now();
   console.log('╔══════════════════════════════════════════════════════════╗');
   console.log('║  Bao Resumable Download Demo                             ║');
   console.log('║  Demonstrating verified downloads from untrusted sources ║');
@@ -563,6 +597,9 @@ async function main(): Promise<void> {
 
     // Phase 3: Verify results
     phase3_VerifyResults(testData, downloadedData);
+
+    // Print total demo time
+    printDemoTime(demoStartTime);
   } finally {
     // Cleanup servers
     console.log('\nShutting down servers...');
