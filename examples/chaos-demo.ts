@@ -196,7 +196,8 @@ function createChaosServer(
 
             case 'timeout':
               console.log(`     [SERVER] Injecting timeout (attempt ${attempt}/${groupConfig.failCount})`);
-              // Just don't respond - socket will eventually timeout
+              // Don't respond, but destroy socket after 5s to prevent socket exhaustion
+              setTimeout(() => res.destroy(), 5000);
               return;
 
             case 'corruption':
@@ -294,13 +295,7 @@ function verifyChunkGroup(
     return false;
   }
 
-  for (let i = 0; i < data.length; i++) {
-    if (data[i] !== original[start + i]) {
-      return false;
-    }
-  }
-
-  return true;
+  return data.every((b, i) => b === original[start + i]);
 }
 
 async function fetchChunkGroupWithBaoVerification(
@@ -331,10 +326,9 @@ async function fetchChunkGroupWithBaoVerification(
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
-
       // Handle 429 rate limiting
       if (response.status === 429) {
+        clearTimeout(timeoutId); // Clear timeout before continue
         const retryAfter = response.headers.get('Retry-After');
         const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : 1000;
         console.log(`     [RETRY] Rate limited, waiting ${waitMs}ms...`);
@@ -375,7 +369,6 @@ async function fetchChunkGroupWithBaoVerification(
         totalTime,
       };
     } catch (error) {
-      clearTimeout(timeoutId);
       lastError = error instanceof Error ? error : new Error(String(error));
 
       if (attempts < maxRetries) {
@@ -387,6 +380,8 @@ async function fetchChunkGroupWithBaoVerification(
         metrics.totalRetryTime += delay;
         await sleep(delay);
       }
+    } finally {
+      clearTimeout(timeoutId); // Guarantee cleanup
     }
   }
 
@@ -476,8 +471,6 @@ async function runScenario(
       if (result.recovered) {
         console.log();
       }
-
-      await sleep(50);
     }
 
     console.log('\n');
@@ -520,7 +513,11 @@ async function runScenario(
     totalAttempts,
     recoveredChunks,
     verificationPassed,
-    metrics: { ...metrics },
+    metrics: {
+      ...metrics,
+      retryDelays: metrics.retryDelays.slice(),
+      requestTimings: metrics.requestTimings.slice(),
+    },
   };
 }
 
