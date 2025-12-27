@@ -14,6 +14,7 @@
  *
  * Usage:
  *   npx tsx examples/chaos-demo.ts
+ *   npx tsx examples/chaos-demo.ts --json
  */
 
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
@@ -24,6 +25,7 @@ import { baoEncodeIroh, PartialBao, countChunkGroups } from 'blake3-bao';
 // Configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
+const JSON_MODE = process.argv.includes('--json');
 const PORT = 3099;
 const DATA_SIZE = 64 * 1024; // 64 KB of test data (4 chunk groups)
 const CHUNK_GROUP_SIZE = 16 * 1024; // 16KB per chunk group (Iroh-compatible)
@@ -99,7 +101,17 @@ function progressBar(current: number, total: number): string {
 }
 
 function log(icon: string, message: string): void {
-  console.log(`  ${icon}  ${message}`);
+  if (!JSON_MODE) console.log(`  ${icon}  ${message}`);
+}
+
+// Wrapper for console.log that respects JSON_MODE
+function output(...args: unknown[]): void {
+  if (!JSON_MODE) console.log(...args);
+}
+
+// Wrapper for process.stdout.write that respects JSON_MODE
+function write(text: string): void {
+  if (!JSON_MODE) process.stdout.write(text);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -115,7 +127,7 @@ interface TestData {
 }
 
 async function generateTestData(): Promise<TestData> {
-  console.log(`\nGenerating ${formatBytes(DATA_SIZE)} of test data...`);
+  output(`\nGenerating ${formatBytes(DATA_SIZE)} of test data...`);
 
   // Create deterministic test data
   const original = new Uint8Array(DATA_SIZE);
@@ -129,9 +141,9 @@ async function generateTestData(): Promise<TestData> {
   const hash = result.hash;
   const numGroups = countChunkGroups(original.length);
 
-  console.log(`  Original size: ${formatBytes(original.length)}`);
-  console.log(`  Chunk groups:  ${numGroups}`);
-  console.log(`  Root hash:     ${bytesToHex(hash).slice(0, 16)}...`);
+  output(`  Original size: ${formatBytes(original.length)}`);
+  output(`  Chunk groups:  ${numGroups}`);
+  output(`  Root hash:     ${bytesToHex(hash).slice(0, 16)}...`);
 
   return {
     original,
@@ -190,18 +202,18 @@ function createChaosServer(
 
           switch (groupConfig.failureType) {
             case 'connection-drop':
-              console.log(`     [SERVER] Injecting connection drop (attempt ${attempt}/${groupConfig.failCount})`);
+              output(`     [SERVER] Injecting connection drop (attempt ${attempt}/${groupConfig.failCount})`);
               res.destroy();
               return;
 
             case 'timeout':
-              console.log(`     [SERVER] Injecting timeout (attempt ${attempt}/${groupConfig.failCount})`);
+              output(`     [SERVER] Injecting timeout (attempt ${attempt}/${groupConfig.failCount})`);
               // Don't respond, but destroy socket after 5s to prevent socket exhaustion
               setTimeout(() => res.destroy(), 5000);
               return;
 
             case 'corruption':
-              console.log(`     [SERVER] Injecting corruption (attempt ${attempt}/${groupConfig.failCount})`);
+              output(`     [SERVER] Injecting corruption (attempt ${attempt}/${groupConfig.failCount})`);
               const chunk = data.slice(start, end + 1);
               const corrupted = new Uint8Array(chunk);
               for (let i = 0; i < corrupted.length; i += 128) {
@@ -217,7 +229,7 @@ function createChaosServer(
               return;
 
             case 'partial-chunk':
-              console.log(`     [SERVER] Injecting partial chunk (attempt ${attempt}/${groupConfig.failCount})`);
+              output(`     [SERVER] Injecting partial chunk (attempt ${attempt}/${groupConfig.failCount})`);
               const fullChunk = data.slice(start, end + 1);
               const partialLength = Math.floor(fullChunk.length * 0.7);
               const partialChunk = fullChunk.slice(0, partialLength);
@@ -232,7 +244,7 @@ function createChaosServer(
               return;
 
             case 'rate-limit':
-              console.log(`     [SERVER] Injecting 429 rate limit (attempt ${attempt}/${groupConfig.failCount})`);
+              output(`     [SERVER] Injecting 429 rate limit (attempt ${attempt}/${groupConfig.failCount})`);
               res.writeHead(429, {
                 'Content-Type': 'text/plain',
                 'Retry-After': '1',
@@ -331,7 +343,7 @@ async function fetchChunkGroupWithBaoVerification(
         clearTimeout(timeoutId); // Clear timeout before continue
         const retryAfter = response.headers.get('Retry-After');
         const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : 1000;
-        console.log(`     [RETRY] Rate limited, waiting ${waitMs}ms...`);
+        output(`     [RETRY] Rate limited, waiting ${waitMs}ms...`);
         metrics.retryDelays.push(waitMs);
         await sleep(waitMs);
         continue;
@@ -354,7 +366,7 @@ async function fetchChunkGroupWithBaoVerification(
       // In production with Bao slices, this happens automatically
       const isValid = verifyChunkGroup(groupIndex, data, original);
       if (!isValid) {
-        console.log(`     [VERIFY] Bao hash mismatch in group ${groupIndex + 1}, retrying...`);
+        output(`     [VERIFY] Bao hash mismatch in group ${groupIndex + 1}, retrying...`);
         throw new Error('Bao verification failed - hash mismatch');
       }
 
@@ -407,10 +419,10 @@ async function runScenario(
   testData: TestData,
   chaosConfig: ChaosConfig
 ): Promise<ScenarioResult> {
-  console.log('\n' + '='.repeat(60));
-  console.log(`${emoji} SCENARIO: ${name}`);
-  console.log('='.repeat(60));
-  console.log(`\n  ${description}\n`);
+  output('\n' + '='.repeat(60));
+  output(`${emoji} SCENARIO: ${name}`);
+  output('='.repeat(60));
+  output(`\n  ${description}\n`);
 
   // Reset metrics and chaos counters
   resetMetrics();
@@ -429,7 +441,7 @@ async function runScenario(
     // Initialize PartialBao verifier
     const partial = new PartialBao(testData.rootHash, testData.original.length);
 
-    console.log('  Downloading with chaos injection...\n');
+    output('  Downloading with chaos injection...\n');
 
     // Download all chunk groups
     for (let groupIndex = 0; groupIndex < testData.numGroups; groupIndex++) {
@@ -463,17 +475,17 @@ async function runScenario(
         ? `\u2705 (recovered after ${result.attempts} attempts)`
         : '\u2705';
 
-      process.stdout.write(
+      write(
         `\r  [${progressBar(groupIndex + 1, testData.numGroups)}] ` +
           `${percent.toFixed(0)}% - Group ${groupIndex + 1}/${testData.numGroups} ${status}`
       );
 
       if (result.recovered) {
-        console.log();
+        output();
       }
     }
 
-    console.log('\n');
+    output('\n');
 
     // Finalize and verify
     log('\u{1f50d}', 'Finalizing Bao verification...');
@@ -503,10 +515,10 @@ async function runScenario(
   }
 
   // Print scenario summary
-  console.log('\n  Summary:');
-  console.log(`    Total fetch attempts: ${totalAttempts}`);
-  console.log(`    Chunks recovered:     ${recoveredChunks}`);
-  console.log(`    Verification:         ${verificationPassed ? 'PASSED' : 'FAILED'}`);
+  output('\n  Summary:');
+  output(`    Total fetch attempts: ${totalAttempts}`);
+  output(`    Chunks recovered:     ${recoveredChunks}`);
+  output(`    Verification:         ${verificationPassed ? 'PASSED' : 'FAILED'}`);
 
   return {
     success,
@@ -626,9 +638,9 @@ async function scenario6_CombinedStress(testData: TestData): Promise<ScenarioRes
 // ─────────────────────────────────────────────────────────────────────────────
 
 function printPerformanceMetrics(allResults: Map<string, ScenarioResult>): void {
-  console.log('\n' + '='.repeat(60));
-  console.log('\u{1f4ca} PERFORMANCE METRICS');
-  console.log('='.repeat(60));
+  output('\n' + '='.repeat(60));
+  output('\u{1f4ca} PERFORMANCE METRICS');
+  output('='.repeat(60));
 
   let totalBytes = 0;
   let totalRetryTime = 0;
@@ -648,7 +660,7 @@ function printPerformanceMetrics(allResults: Map<string, ScenarioResult>): void 
     ? allDelays.reduce((a, b) => a + b, 0) / allDelays.length
     : 0;
 
-  console.log(`
+  output(`
   Aggregate Statistics:
   ---------------------
   Total bytes transferred:  ${formatBytes(totalBytes)}
@@ -658,19 +670,19 @@ function printPerformanceMetrics(allResults: Map<string, ScenarioResult>): void 
   Total retry attempts:     ${allDelays.length}
 `);
 
-  console.log('  Per-Scenario Breakdown:');
-  console.log('  ' + '-'.repeat(56));
+  output('  Per-Scenario Breakdown:');
+  output('  ' + '-'.repeat(56));
 
   for (const [name, result] of allResults) {
     const m = result.metrics;
     const avgDelay = m.retryDelays.length > 0
       ? m.retryDelays.reduce((a, b) => a + b, 0) / m.retryDelays.length
       : 0;
-    console.log(`  ${name}:`);
-    console.log(`    Bytes: ${formatBytes(m.totalBytesTransferred)}, Retries: ${m.retryDelays.length}, Avg delay: ${formatMs(avgDelay)}`);
+    output(`  ${name}:`);
+    output(`    Bytes: ${formatBytes(m.totalBytesTransferred)}, Retries: ${m.retryDelays.length}, Avg delay: ${formatMs(avgDelay)}`);
   }
 
-  console.log('  ' + '-'.repeat(56));
+  output('  ' + '-'.repeat(56));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -678,26 +690,26 @@ function printPerformanceMetrics(allResults: Map<string, ScenarioResult>): void 
 // ─────────────────────────────────────────────────────────────────────────────
 
 function printFinalSummary(results: Map<string, ScenarioResult>): void {
-  console.log('\n' + '='.repeat(60));
-  console.log('CHAOS DEMO RESULTS');
-  console.log('='.repeat(60));
+  output('\n' + '='.repeat(60));
+  output('CHAOS DEMO RESULTS');
+  output('='.repeat(60));
 
   let allPassed = true;
 
-  console.log('\n  Scenario Results:');
-  console.log('  ' + '-'.repeat(56));
+  output('\n  Scenario Results:');
+  output('  ' + '-'.repeat(56));
 
   for (const [name, result] of results) {
     const status = result.success ? '\u2705 PASS' : '\u274c FAIL';
-    console.log(`  ${status}  ${name}`);
-    console.log(`         Attempts: ${result.totalAttempts}, Recoveries: ${result.recoveredChunks}`);
+    output(`  ${status}  ${name}`);
+    output(`         Attempts: ${result.totalAttempts}, Recoveries: ${result.recoveredChunks}`);
     if (!result.success) allPassed = false;
   }
 
-  console.log('  ' + '-'.repeat(56));
+  output('  ' + '-'.repeat(56));
 
   if (allPassed) {
-    console.log(`
+    output(`
   \u{1f389} ALL SCENARIOS PASSED!
 
   Bao successfully handled:
@@ -716,13 +728,13 @@ function printFinalSummary(results: Map<string, ScenarioResult>): void {
   4. INTEGRITY: Final data cryptographically verified
 `);
   } else {
-    console.log('\n  \u26a0\ufe0f  SOME SCENARIOS FAILED - check output above\n');
+    output('\n  \u26a0\ufe0f  SOME SCENARIOS FAILED - check output above\n');
   }
 
-  console.log('='.repeat(60));
-  console.log('WHY THIS MATTERS FOR ZCASH');
-  console.log('='.repeat(60));
-  console.log(`
+  output('='.repeat(60));
+  output('WHY THIS MATTERS FOR ZCASH');
+  output('='.repeat(60));
+  output(`
   Real-world wallet sync faces all these challenges:
 
   \u{1f4e1} Connection Drops:
@@ -755,10 +767,12 @@ function printFinalSummary(results: Map<string, ScenarioResult>): void {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  console.log('\u2554' + '\u2550'.repeat(58) + '\u2557');
-  console.log('\u2551  Bao Chaos Demo - Edge Case Resilience Testing            \u2551');
-  console.log('\u2551  Testing: 6 failure scenarios with real Bao verification  \u2551');
-  console.log('\u255a' + '\u2550'.repeat(58) + '\u255d');
+  const startTime = Date.now();
+
+  output('\u2554' + '\u2550'.repeat(58) + '\u2557');
+  output('\u2551  Bao Chaos Demo - Edge Case Resilience Testing            \u2551');
+  output('\u2551  Testing: 6 failure scenarios with real Bao verification  \u2551');
+  output('\u255a' + '\u2550'.repeat(58) + '\u255d');
 
   // Generate test data once
   const testData = await generateTestData();
@@ -796,14 +810,50 @@ async function main(): Promise<void> {
     await scenario6_CombinedStress(testData)
   );
 
-  // Print performance metrics
-  printPerformanceMetrics(results);
+  const totalDuration = Date.now() - startTime;
+  const allPassed = Array.from(results.values()).every((r) => r.success);
 
-  // Print final summary
-  printFinalSummary(results);
+  if (JSON_MODE) {
+    // Output JSON results for CI integration
+    const jsonOutput = {
+      success: allPassed,
+      duration: totalDuration,
+      scenarios: Object.fromEntries(
+        Array.from(results.entries()).map(([name, result]) => [
+          name.replace(/^[\u{1f4e1}\u{1f512}\u23f1\ufe0f\u{1f4e6}\u{1f6a6}\u{1f4a5}]\s*/u, ''),
+          {
+            passed: result.success,
+            attempts: result.totalAttempts,
+            recoveries: result.recoveredChunks,
+            verified: result.verificationPassed,
+            metrics: {
+              bytesTransferred: result.metrics.totalBytesTransferred,
+              retryTime: result.metrics.totalRetryTime,
+              worstLatency: result.metrics.worstCaseLatency,
+              retryCount: result.metrics.retryDelays.length,
+              avgRetryDelay: result.metrics.retryDelays.length > 0
+                ? result.metrics.retryDelays.reduce((a, b) => a + b, 0) / result.metrics.retryDelays.length
+                : 0,
+            },
+          },
+        ])
+      ),
+      summary: {
+        totalScenarios: results.size,
+        passed: Array.from(results.values()).filter((r) => r.success).length,
+        failed: Array.from(results.values()).filter((r) => !r.success).length,
+      },
+    };
+    console.log(JSON.stringify(jsonOutput, null, 2));
+  } else {
+    // Print performance metrics
+    printPerformanceMetrics(results);
+
+    // Print final summary
+    printFinalSummary(results);
+  }
 
   // Exit with appropriate code
-  const allPassed = Array.from(results.values()).every((r) => r.success);
   process.exit(allPassed ? 0 : 1);
 }
 

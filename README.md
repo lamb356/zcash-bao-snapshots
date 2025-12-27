@@ -368,6 +368,30 @@ try {
 - `TIMEOUT` - Request timed out
 - `NETWORK_ERROR` - Network unavailable
 
+## Examples
+
+### Chaos Testing
+
+Test Bao's resilience to network failures:
+
+```bash
+npm run test:chaos
+```
+
+Tests 6 scenarios:
+- 📡 Connection drops at 99%
+- 🔒 Corrupted final bytes
+- ⏱️ Timeout on last chunk
+- 📦 Partial chunk delivery
+- 🚦 Rate limiting (HTTP 429)
+- 💥 Combined stress test
+
+For JSON output (CI integration):
+
+```bash
+npm run test:chaos -- --json
+```
+
 ## Related Projects
 
 - [blake3-bao](https://github.com/lamb356/blake3-optimized) - BLAKE3 and Bao implementation this library uses
