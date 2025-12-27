@@ -32,7 +32,7 @@ interface ChaosConfig {
   /** How many times to fail before succeeding */
   failCount: number;
   /** Type of failure to inject */
-  failureType: 'connection-drop' | 'corruption' | 'timeout';
+  failureType: 'connection-drop' | 'corruption' | 'timeout' | 'partial-chunk';
   /** Current failure counter */
   currentFailures: number;
 }
@@ -182,6 +182,24 @@ function createChaosServer(
             });
             res.end(Buffer.from(corrupted));
             return;
+
+          case 'partial-chunk':
+            // Send only 70% of the chunk then drop connection
+            console.log(`     [SERVER] Injecting partial chunk (attempt ${attempt}/${chaos.failCount})`);
+            const fullChunk = data.slice(start, end + 1);
+            const partialLength = Math.floor(fullChunk.length * 0.7);
+            const partialChunk = fullChunk.slice(0, partialLength);
+            // Advertise full length but only send partial
+            res.writeHead(206, {
+              'Content-Type': 'application/octet-stream',
+              'Content-Range': `bytes ${start}-${end}/${data.length}`,
+              'Content-Length': fullChunk.length, // Lie about length
+              'Accept-Ranges': 'bytes',
+            });
+            res.write(Buffer.from(partialChunk));
+            // Destroy connection without finishing
+            res.destroy();
+            return;
         }
       }
 
@@ -259,8 +277,10 @@ async function fetchChunkGroupWithRetry(
       lastError = error instanceof Error ? error : new Error(String(error));
 
       if (attempts < maxRetries) {
-        // Exponential backoff
-        const delay = Math.min(100 * Math.pow(2, attempts - 1), 1000);
+        // Exponential backoff with jitter
+        const baseDelay = 100 * Math.pow(2, attempts - 1);
+        const jitter = Math.random() * 0.3 * baseDelay;
+        const delay = Math.min(baseDelay + jitter, 1000);
         await sleep(delay);
       }
     }
@@ -359,8 +379,10 @@ async function fetchChunkGroupWithVerification(
       lastError = error instanceof Error ? error : new Error(String(error));
 
       if (attempts < maxRetries) {
-        // Exponential backoff
-        const delay = Math.min(100 * Math.pow(2, attempts - 1), 1000);
+        // Exponential backoff with jitter
+        const baseDelay = 100 * Math.pow(2, attempts - 1);
+        const jitter = Math.random() * 0.3 * baseDelay;
+        const delay = Math.min(baseDelay + jitter, 1000);
         await sleep(delay);
       }
     }
@@ -543,6 +565,23 @@ async function scenario3_TimeoutOnLastChunk(testData: TestData): Promise<Scenari
   );
 }
 
+async function scenario4_PartialChunkDelivery(testData: TestData): Promise<ScenarioResult> {
+  const lastGroup = testData.numGroups - 1;
+  return runScenario(
+    'Partial Chunk Delivery',
+    `The server sends only 70% of the last chunk group (group ${lastGroup + 1}) then drops.\n` +
+      '  This simulates incomplete data transfer mid-chunk.\n' +
+      '  Bao should detect the incomplete data and retry.',
+    testData,
+    {
+      failOnGroup: lastGroup,
+      failCount: 2,
+      failureType: 'partial-chunk',
+      currentFailures: 0,
+    }
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Results Summary
 // ─────────────────────────────────────────────────────────────────────────────
@@ -574,10 +613,11 @@ function printFinalSummary(results: Map<string, ScenarioResult>): void {
     \u2713 Connection drops at 99% completion
     \u2713 Corrupted final bytes (bit flips)
     \u2713 Timeout on last chunk
+    \u2713 Partial chunk delivery (70% then drop)
 
   Key Takeaways:
   --------------
-  1. RETRY LOGIC: Automatic exponential backoff retries
+  1. RETRY LOGIC: Automatic exponential backoff with jitter
   2. VERIFICATION: Cryptographic detection of corruption
   3. RESILIENCE: Graceful recovery from network failures
   4. INTEGRITY: Final data always verified against root hash
@@ -607,6 +647,11 @@ function printFinalSummary(results: Map<string, ScenarioResult>): void {
     - Network congestion
     - Geographic routing issues
 
+  Partial Delivery:
+    - Connection lost mid-transfer
+    - Proxy/load balancer interruptions
+    - Streaming data cut short
+
   Bao ensures wallet sync succeeds despite these challenges,
   with cryptographic proof of data integrity.
 `);
@@ -619,7 +664,7 @@ function printFinalSummary(results: Map<string, ScenarioResult>): void {
 async function main(): Promise<void> {
   console.log('\u2554' + '\u2550'.repeat(58) + '\u2557');
   console.log('\u2551  Bao Chaos Demo - Edge Case Resilience Testing            \u2551');
-  console.log('\u2551  Testing: Connection drops, corruption, and timeouts      \u2551');
+  console.log('\u2551  Testing: drops, corruption, timeouts, partial delivery   \u2551');
   console.log('\u255a' + '\u2550'.repeat(58) + '\u255d');
 
   // Generate test data once
@@ -627,7 +672,7 @@ async function main(): Promise<void> {
 
   const results = new Map<string, ScenarioResult>();
 
-  // Run all three scenarios
+  // Run all four scenarios
   results.set(
     'Connection Drop at 99%',
     await scenario1_ConnectionDropAt99(testData)
@@ -641,6 +686,11 @@ async function main(): Promise<void> {
   results.set(
     'Timeout on Last Chunk',
     await scenario3_TimeoutOnLastChunk(testData)
+  );
+
+  results.set(
+    'Partial Chunk Delivery',
+    await scenario4_PartialChunkDelivery(testData)
   );
 
   // Print final summary
